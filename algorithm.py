@@ -13,10 +13,17 @@ both their preferred positions at least once.
 import math
 import random
 
+# Standard court order, goal shooter (GS) to goal keeper (GK); slots are also filled in this order
 POSITION_ORDER = ["GS", "GA", "WA", "C", "WD", "GD", "GK"]
+# A netball team has 7 players on court
 PLAYERS_PER_TEAM = 7
+# Safety cap so the program cannot loop forever if a roster can never be satisfied
 MAX_ROUNDS = 80
 
+# Set True to print how many slots each phase fills in every round (debugging)
+DEBUG = False
+
+# (Team A colour, Team B colour) for each court; repeats after four courts
 BIB_COLOUR_POOL = [
     ("Black", "Pink"),
     ("Blue", "Orange"),
@@ -26,6 +33,7 @@ BIB_COLOUR_POOL = [
 
 
 def bib_colours_for_court(court_number):
+    """Returns {"A": colour, "B": colour} for a court, repeating the pool after four courts."""
     pair = BIB_COLOUR_POOL[(court_number - 1) % len(BIB_COLOUR_POOL)]
     return {"A": pair[0], "B": pair[1]}
 
@@ -37,11 +45,13 @@ def theoretical_minimum_rounds(players, num_courts):
     """Lower bound on rounds needed, from slot supply vs preference demand."""
     if not players:
         return 0
+    # demand[position] = how many players want that position as 1st or 2nd choice
     demand = {}
     for p in players:
         demand[p["position_1"]] = demand.get(p["position_1"], 0) + 1
         if p["position_2"] != p["position_1"]:
             demand[p["position_2"]] = demand.get(p["position_2"], 0) + 1
+    # Each court has two teams, so 2 slots per position per court
     slots_per_position = 2 * num_courts
     lb_position = max(math.ceil(d / slots_per_position) for d in demand.values())
     needs = sum(1 if p["position_1"] == p["position_2"] else 2 for p in players)
@@ -50,6 +60,7 @@ def theoretical_minimum_rounds(players, num_courts):
 
 
 def _build_slots(num_courts):
+    """Returns every place on court for one round: (court, team, position) for each court, both teams, all 7 positions."""
     return [
         {"court_number": c, "team": t, "position": pos}
         for c in range(1, num_courts + 1)
@@ -59,6 +70,8 @@ def _build_slots(num_courts):
 
 
 def _claim(slots_for_pos, ranked, used, filled, skip):
+    """Gives the free slots of one position to the top-ranked players and returns those winners.
+    Players who were ranked but missed out get 1 added to their skip counter, so they rank higher next round."""
     free = [s for s in slots_for_pos if s not in filled]
     winners = ranked[: len(free)]
     for slot, player in zip(free, winners):
@@ -76,6 +89,12 @@ def generate_rounds(players, num_rounds, num_courts=1):
     if num_rounds < 1:
         raise ValueError("num_rounds must be at least 1.")
 
+    # A position that is not one of the seven can never be given out, so refuse it now
+    # instead of looping until MAX_ROUNDS.
+    for p in players:
+        if p["position_1"] not in POSITION_ORDER or p["position_2"] not in POSITION_ORDER:
+            raise ValueError(f"Player {p['player_id']} has a position that is not one of {', '.join(POSITION_ORDER)}.")
+
     players_needed = PLAYERS_PER_TEAM * 2 * num_courts
     if len(players) < players_needed:
         raise ValueError(
@@ -83,14 +102,20 @@ def generate_rounds(players, num_rounds, num_courts=1):
             f"got {len(players)}."
         )
 
+    # The dicts below each track every player through the trial
     ids = [p["player_id"] for p in players]
+    # pos1_done / pos2_done: has the player played their 1st / 2nd preference yet?
     pos1_done = {pid: False for pid in ids}
     pos2_done = {pid: False for pid in ids}
+    # skip1 / skip2: times a player needed a preferred slot but missed out (more misses = higher in the queue)
     skip1 = {pid: 0 for pid in ids}
     skip2 = {pid: 0 for pid in ids}
+    # Rounds in a row the player has sat out; used to choose filler players fairly
     bench_wait = {pid: 0 for pid in ids}
 
+    # One entry for every place on court in a round (court, team, position)
     slot_template = _build_slots(num_courts)
+    # {position: [slot numbers]} so each position's slots can be found quickly
     slots_by_position = {
         pos: [i for i, s in enumerate(slot_template) if s["position"] == pos]
         for pos in POSITION_ORDER
@@ -99,9 +124,12 @@ def generate_rounds(players, num_rounds, num_courts=1):
     rounds_output = []
 
     for round_number in range(1, num_rounds + 1):
+        # filled: slot number -> the player placed there this round
         filled = {}
+        # used: ids already placed this round (a set is a quick 'already used?' check)
         used = set()
 
+        # Phase A: give each position's slots to players who still need it as their 1st choice
         for pos in POSITION_ORDER:
             ranked = sorted(
                 (p for p in players
@@ -112,6 +140,9 @@ def generate_rounds(players, num_rounds, num_courts=1):
             )
             _claim(slots_by_position[pos], ranked, used, filled, skip1)
 
+        filled_by_a = len(filled)
+
+        # Phase B: same again for 2nd choices, using the slots Phase A left free
         for pos in POSITION_ORDER:
             ranked = sorted(
                 (p for p in players
@@ -122,6 +153,9 @@ def generate_rounds(players, num_rounds, num_courts=1):
             )
             _claim(slots_by_position[pos], ranked, used, filled, skip2)
 
+        filled_by_b = len(filled) - filled_by_a
+
+        # Phase C: everyone not yet placed, longest on the bench first, fills the slots still empty
         spare = sorted(
             (p for p in players if p["player_id"] not in used),
             key=lambda p: (-bench_wait[p["player_id"]], p["player_id"]),
@@ -134,6 +168,12 @@ def generate_rounds(players, num_rounds, num_courts=1):
             filled[index] = player
             used.add(player["player_id"])
 
+        if DEBUG:
+            # Slots filled by each phase this round (C is whatever A and B left)
+            print(f"Round {round_number}: phase A filled {filled_by_a} slots, phase B {filled_by_b}, "
+                  f"phase C {len(slot_template) - filled_by_a - filled_by_b}")
+
+        # by_team: (court, team) -> list of {position, player} used to build the output
         by_team = {}
         for index, slot in enumerate(slot_template):
             player = filled[index]
@@ -156,7 +196,13 @@ def generate_rounds(players, num_rounds, num_courts=1):
             })
 
         for pid in ids:
+            # Players who played reset to 0; everyone else has sat out one more round
             bench_wait[pid] = 0 if pid in used else bench_wait[pid] + 1
+
+        if DEBUG:
+            # Players who have not yet played both of their preferred positions
+            waiting = sum(1 for pid in ids if not (pos1_done[pid] and pos2_done[pid]))
+            print(f"    {waiting} player(s) still need a preferred position")
 
     return rounds_output
 
@@ -164,6 +210,7 @@ def generate_rounds(players, num_rounds, num_courts=1):
 def check_guarantee_met(players, rounds_output):
     """Returns player ids who haven't yet played both preferred positions."""
     by_id = {p["player_id"]: p for p in players}
+    # ids who have played their 1st / 2nd preferred position at least once
     seen1, seen2 = set(), set()
     for round_data in rounds_output:
         for a in round_data["assignments"]:
@@ -180,6 +227,7 @@ def check_guarantee_met(players, rounds_output):
 
 def generate_minimum_rounds(players, num_courts=1, max_rounds=MAX_ROUNDS):
     """Keeps adding rounds until every player has had both positions."""
+    # Try 1 round, then 2, and so on; the first number that satisfies everyone is the minimum
     for num_rounds in range(1, max_rounds + 1):
         rounds_output = generate_rounds(players, num_rounds, num_courts)
         failed = check_guarantee_met(players, rounds_output)
@@ -194,6 +242,8 @@ def generate_minimum_rounds(players, num_courts=1, max_rounds=MAX_ROUNDS):
 # --------------------------------------------------------------------------- #
 
 def _random_roster(seed, n, demand_skew=0.0, skewed_position="GK"):
+    """Makes n random test players. demand_skew is the chance a player picks skewed_position as 1st
+    choice, which makes some positions very popular. The seed makes it repeatable."""
     random.seed(seed)
     players = []
     for i in range(n):
@@ -207,6 +257,7 @@ def _random_roster(seed, n, demand_skew=0.0, skewed_position="GK"):
 
 
 def _build_sweep_configs():
+    """Returns the (seed, players, courts, skew) combinations used by the full stress test."""
     configs = []
     seed = 0
     for num_courts in (1, 2, 3):
@@ -221,11 +272,14 @@ def _build_sweep_configs():
 
 
 def run_stress_test(quick=False):
+    """Runs many random rosters through generate_minimum_rounds and prints how many met the
+    guarantee and how close to the theoretical minimum they got. quick=True runs just 50."""
     if quick:
         configs = [(seed, 100, 2, 0.0) for seed in range(50)]
     else:
         configs = _build_sweep_configs()
 
+    # failures = rosters that never met the guarantee; optimal = rosters drawn in the theoretical minimum rounds
     failures = 0
     optimal = 0
     max_rounds_seen = 0

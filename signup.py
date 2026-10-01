@@ -13,9 +13,12 @@ from tkinter import ttk, messagebox
 
 import players as store
 
+# The seven netball positions
 POSITIONS = ["GS", "GA", "WA", "C", "WD", "GD", "GK"]
+# Longest playing history allowed (matches the data dictionary)
 PLAYING_HISTORY_MAX_CHARS = 150
 
+# Same colours as the main app
 NAVY = "#1f3864"
 WHITE = "#ffffff"
 LIGHT_GREY = "#f2f2f2"
@@ -26,6 +29,7 @@ FONT_FAMILY = "Arial"
 
 
 def setup_styles(root):
+    """Sets the same colours and fonts as the main app for every kind of widget used here."""
     style = ttk.Style(root)
     try:
         style.theme_use("clam")
@@ -59,6 +63,7 @@ class SignupApp(tk.Tk):
     used for the next player straight away."""
 
     def __init__(self):
+        """Builds the window and header, loads the trials and shows the form (or a message if none exist)."""
         super().__init__()
         self.title("Netball Trial Registration")
         self.geometry("520x680")
@@ -72,6 +77,7 @@ class SignupApp(tk.Tk):
         )
         header.pack(fill="x")
 
+        # Trials shown in the dropdown; if there are none only a message is shown
         self.trials = store.get_all_trials()
         if not self.trials:
             ttk.Label(
@@ -88,6 +94,7 @@ class SignupApp(tk.Tk):
     # ------------------------------------------------------------------ #
 
     def build_form(self):
+        """Lays out every label and input box of the registration form, then the Save button."""
         outer = ttk.Frame(self)
         outer.pack(fill="both", expand=True, padx=20, pady=16)
 
@@ -95,6 +102,7 @@ class SignupApp(tk.Tk):
             outer, text="* = required field", style="Required.TLabel"
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
+        # Row counter: each field method returns the next free row
         row = 1
         row = self._labelled(outer, row, "Trial *", self._build_trial_picker)
         row = self._labelled(outer, row, "First Name *", lambda p: self._entry(p, "first_name_entry"))
@@ -129,11 +137,13 @@ class SignupApp(tk.Tk):
         return row + 1
 
     def _entry(self, parent, attr_name, width=32):
+        """Makes a text box and stores it on self under attr_name so submit() can read it later."""
         entry = ttk.Entry(parent, width=width)
         setattr(self, attr_name, entry)
         return entry
 
     def _build_trial_picker(self, parent):
+        """Makes the dropdown of trials, starting on the first one."""
         self.trial_var = tk.StringVar()
         combo = ttk.Combobox(parent, textvariable=self.trial_var, state="readonly", width=30)
         combo["values"] = [f"{t['trial_name']} ({t['age_group']})" for t in self.trials]
@@ -143,6 +153,7 @@ class SignupApp(tk.Tk):
         return combo
 
     def _build_dob_field(self, parent):
+        """Makes the date of birth box with a label beside it for live feedback."""
         wrapper = ttk.Frame(parent)
         self.dob_entry = ttk.Entry(wrapper, width=16)
         self.dob_entry.pack(side="left")
@@ -152,18 +163,22 @@ class SignupApp(tk.Tk):
         return wrapper
 
     def _build_pos1_combo(self, parent):
+        """Makes the read-only dropdown for Position 1."""
         self.pos1_combo = ttk.Combobox(parent, values=POSITIONS, state="readonly", width=8)
         return self.pos1_combo
 
     def _build_pos2_combo(self, parent):
+        """Makes the read-only dropdown for Position 2."""
         self.pos2_combo = ttk.Combobox(parent, values=POSITIONS, state="readonly", width=8)
         return self.pos2_combo
 
     def _build_pos3_combo(self, parent):
+        """Makes the read-only dropdown for Position 3 (can be left blank)."""
         self.pos3_combo = ttk.Combobox(parent, values=[""] + POSITIONS, state="readonly", width=8)
         return self.pos3_combo
 
     def _build_playing_history(self, parent):
+        """Makes the multi-line playing history box with its live character counter."""
         wrapper = ttk.Frame(parent)
         self.playing_history_text = tk.Text(wrapper, width=32, height=4, wrap="word", font=(FONT_FAMILY, 10))
         self.playing_history_text.pack(anchor="w")
@@ -179,6 +194,7 @@ class SignupApp(tk.Tk):
     # ------------------------------------------------------------------ #
 
     def selected_trial(self):
+        """Returns the trial picked in the dropdown as a dict, or None."""
         index = self.trial_combo.current()
         if index < 0:
             return None
@@ -208,6 +224,7 @@ class SignupApp(tk.Tk):
     def on_playing_history_typed(self, event=None):
         """Caps playing history at PLAYING_HISTORY_MAX_CHARS and keeps the
         counter beside it live."""
+        # Tk text boxes start at line 1 char 0; end-1c leaves off the automatic final newline
         text = self.playing_history_text.get("1.0", "end-1c")
         if len(text) > PLAYING_HISTORY_MAX_CHARS:
             text = text[:PLAYING_HISTORY_MAX_CHARS]
@@ -220,17 +237,24 @@ class SignupApp(tk.Tk):
     # ------------------------------------------------------------------ #
 
     def submit(self):
+        """Checks the form, saves the player, shows the trial number and clears the form for the next player."""
         trial = self.selected_trial()
         if not trial:
             messagebox.showerror("Error", "Select a trial to register for.")
             return
 
+        # Read the form; pos1 to pos3 are the position dropdowns (pos3 is optional)
         first_name = self.first_name_entry.get().strip()
         last_name = self.last_name_entry.get().strip()
         dob = self.dob_entry.get().strip()
         pos1 = self.pos1_combo.get()
         pos2 = self.pos2_combo.get()
         pos3 = self.pos3_combo.get()
+        # The optional contact details; they are only checked if something was typed in the box
+        phone = self.phone_entry.get().strip()
+        parent_phone = self.parent_phone_entry.get().strip()
+        email = self.email_entry.get().strip()
+        parent_email = self.parent_email_entry.get().strip()
 
         if not first_name or not last_name or not dob or not pos1 or not pos2:
             messagebox.showerror(
@@ -240,19 +264,33 @@ class SignupApp(tk.Tk):
         if not store.is_valid_date(dob):
             messagebox.showerror("Error", "DOB must be in DD/MM/YYYY format.")
             return
+        if store.is_future_date(dob):
+            messagebox.showerror("Error", "Date of birth can't be in the future.")
+            return
         if pos1 == pos2:
             messagebox.showerror("Error", "Position 1 and Position 2 must be different.")
             return
+        if any(ch.isdigit() for ch in first_name + last_name):
+            messagebox.showerror("Error", "Names can't contain numbers.")
+            return
+        for label, value in (("Phone", phone), ("Parent/Guardian Phone", parent_phone)):
+            if value and not store.is_valid_phone(value):
+                messagebox.showerror("Error", f"{label} must be an Australian number, e.g. 0412 345 678.")
+                return
+        for label, value in (("Email", email), ("Parent/Guardian Email", parent_email)):
+            if value and not store.is_valid_email(value):
+                messagebox.showerror("Error", f"{label} must look like name@example.com.")
+                return
 
         trial_number = store.create_player(
             trial["trial_id"], first_name, last_name, dob, pos1, pos2,
             netball_id=self.netball_id_entry.get().strip(),
             address=self.address_entry.get().strip(),
-            phone=self.phone_entry.get().strip(),
-            email=self.email_entry.get().strip(),
+            phone=phone,
+            email=email,
             parent_name=self.parent_name_entry.get().strip(),
-            parent_phone=self.parent_phone_entry.get().strip(),
-            parent_email=self.parent_email_entry.get().strip(),
+            parent_phone=parent_phone,
+            parent_email=parent_email,
             playing_history=self.playing_history_text.get("1.0", "end-1c").strip(),
             position_3=pos3,
         )
@@ -265,6 +303,7 @@ class SignupApp(tk.Tk):
         self.clear_form()
 
     def clear_form(self):
+        """Empties every box and dropdown, ready for the next person."""
         for attr in (
             "first_name_entry", "last_name_entry", "dob_entry", "netball_id_entry",
             "address_entry", "phone_entry", "email_entry", "parent_name_entry",

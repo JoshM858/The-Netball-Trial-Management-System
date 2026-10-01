@@ -3,9 +3,9 @@ Main GUI for the Netball Trial Management System: login, tabs for Trials,
 Players, Roll Call, Rounds and Export, plus the styling shared across all
 of them.
 
-can_edit() is defined below but not wired up into the GUI yet - a coach or
-referee on the Rounds tab currently has the same view as a coordinator
-even though referees should be read-only.
+can_edit() decides who may change things: on the Rounds tab only the
+coordinator sees the Generate Rounds and Round Settings buttons, so coaches
+and coaches have a view-only draw.
 """
 
 import hashlib
@@ -17,7 +17,11 @@ from tkinter import ttk, messagebox, filedialog
 import players as store
 import algorithm
 
+# The seven netball positions in court order, goal shooter to goal keeper
 POSITIONS = ["GS", "GA", "WA", "C", "WD", "GD", "GK"]
+
+# Longest playing history the form accepts (same limit as the sign-up form)
+PLAYING_HISTORY_MAX_CHARS = 150
 
 
 # --------------------------------------------------------------------------- #
@@ -27,27 +31,29 @@ POSITIONS = ["GS", "GA", "WA", "C", "WD", "GD", "GK"]
 # role is allowed to see (has_access) and edit (can_edit). login() checks
 # username + password + selected role against the users records.
 
-VALID_ROLES = ("coordinator", "coach", "referee", "player")
+# Roles offered in the login dropdown; each must match the role saved on an account
+VALID_ROLES = ("coordinator", "coach", "player")
 
 # Which of the five dashboard tabs each role is allowed to open.
 ROLE_PERMISSIONS = {
     "coordinator": {"Trials", "Players", "Roll Call", "Rounds", "Export"},
     "coach":       {"Rounds"},
-    "referee":     {"Rounds"},
     "player":      {"Players"},
 }
 
 # Whether a role may edit data on a tab it can see, vs. read-only.
-# Not enforced in the GUI yet - defined here so it's ready to wire up.
+# Enforced on the Rounds tab: only roles with "Rounds" here see the
+# Generate Rounds / Round Settings buttons, and generate_rounds() and
+# open_round_settings_dialog() refuse anyone else.
 ROLE_CAN_EDIT = {
     "coordinator": {"Trials", "Players", "Roll Call", "Rounds", "Export"},
-    "coach":       {"Rounds"},
-    "referee":     set(),
+    "coach":       set(),          # view-only: can read the draw but not change it
     "player":      {"Players"},
 }
 
 
 def new_salt():
+    """Returns a random 16-byte salt as 32 hex characters. A new one is made for each account."""
     return secrets.token_hex(16)
 
 
@@ -60,14 +66,18 @@ def hash_password(plain_password, salt_hex):
 
 
 def verify_password(plain_password, salt_hex, stored_hash):
+    """Hashes the typed password with the stored salt and compares it with the stored hash.
+    compare_digest takes the same time whether or not the first characters match."""
     return hmac.compare_digest(hash_password(plain_password, salt_hex or ""), stored_hash)
 
 
 def has_access(role, tab_name):
+    """Returns True if this role is allowed to open the given tab."""
     return tab_name in ROLE_PERMISSIONS.get(role, set())
 
 
 def can_edit(role, tab_name):
+    """Returns True if this role may change things on the given tab (False = view only)."""
     return tab_name in ROLE_CAN_EDIT.get(role, set())
 
 
@@ -75,21 +85,24 @@ class User:
     """Represents the currently logged-in user for the duration of a session."""
 
     def __init__(self, user_id, username, role):
+        """Stores who is logged in: their id, username and role."""
         self.user_id = user_id
         self.username = username
         self.role = role
 
     def has_access(self, tab_name):
+        """Asks has_access() whether this user's role can open the tab."""
         return has_access(self.role, tab_name)
 
     def can_edit(self, tab_name):
+        """Asks can_edit() whether this user's role can change things on the tab."""
         return can_edit(self.role, tab_name)
 
     def display_role(self):
+        """Returns the role as it should be shown on screen, e.g. 'Player/Parent'."""
         return {
             "coordinator": "Coordinator",
             "coach": "Coach",
-            "referee": "Referee",
             "player": "Player/Parent",
         }.get(self.role, self.role.title())
 
@@ -97,6 +110,7 @@ class User:
 def login(username, password, role):
     """Checks username + password + the role picked on the login screen.
     Returns a User on success, None on failure."""
+    # record is the account row from users.csv, or None if the username does not exist
     record = store.get_user_by_username(username.strip())
     if not record:
         return None
@@ -111,6 +125,7 @@ def login(username, password, role):
 # Theming & shared widgets
 # --------------------------------------------------------------------------- #
 
+# Colours used by every screen so the look stays the same
 NAVY = "#1f3864"
 WHITE = "#ffffff"
 LIGHT_GREY = "#f2f2f2"
@@ -118,6 +133,7 @@ DARK_GREY = "#555555"
 GREEN = "#2e7d32"
 RED = "#c62828"
 
+# One font for the whole app
 FONT_FAMILY = "Arial"
 
 
@@ -222,6 +238,7 @@ class ScrollableFrame(ttk.Frame):
     """
 
     def __init__(self, parent, **kwargs):
+        """Builds the canvas, scrollbar and inner frame that make up the scrolling area."""
         super().__init__(parent, **kwargs)
 
         canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
@@ -246,13 +263,18 @@ class ScrollableFrame(ttk.Frame):
 
     @staticmethod
     def _on_mousewheel(canvas):
+        """Returns a function that scrolls the given canvas when the mouse wheel is turned."""
         def handler(event):
+            """Scrolls one step per wheel notch (event.delta is 120 per notch on Windows)."""
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return handler
 
 
 class App(tk.Tk):
+    """The main window. Shows the login screen, then the tabs for the logged-in role, and
+    keeps track of the current user, the selected trial and the roll call ticks."""
     def __init__(self):
+        """Sets up the window, styles and data files, takes a backup, then shows the login screen."""
         super().__init__()
         self.title("Netball Trial Management System")
         self.geometry("900x600")
@@ -262,9 +284,12 @@ class App(tk.Tk):
         store.init_data()
         store.backup_data()
 
+        # The logged-in User; None while nobody is logged in
         self.current_user = None
+        # id of the trial the tabs are working on; None until one is picked
         self.selected_trial_id = None
         self.attendance_vars = {}  # player_id -> IntVar, used on the Roll Call tab
+        # Text shown in the grey status bar at the bottom of the window
         self.status_var = tk.StringVar(value="No trial selected")
 
         self.build_login_screen()
@@ -274,8 +299,10 @@ class App(tk.Tk):
     # ----------------------------------------------------------------- #
 
     def build_login_screen(self):
+        """Draws the username, password and role boxes and the Log In button."""
         build_header_bar(self, "Netball Trial Management System").pack(fill="x")
 
+        # Everything on the login screen sits in this one frame so it can be centred
         self.login_frame = ttk.Frame(self)
         self.login_frame.pack(expand=True)
 
@@ -291,6 +318,7 @@ class App(tk.Tk):
         self.login_role_combo = ttk.Combobox(
             self.login_frame, values=list(VALID_ROLES), state="readonly"
         )
+        # Start on coordinator, the most common login
         self.login_role_combo.set("coordinator")
         self.login_role_combo.grid(row=3, column=1, pady=5)
 
@@ -309,6 +337,9 @@ class App(tk.Tk):
         ).grid(row=6, column=0, columnspan=2, pady=(10, 0))
 
     def attempt_login(self):
+        """Runs when Log In is pressed: checks the boxes are filled in, then logs in or shows one
+        vague error message (so nobody can tell which part was wrong)."""
+        # Read the boxes; strip() removes accidental spaces around the username
         username = self.login_username_entry.get().strip()
         password = self.login_password_entry.get()
         role = self.login_role_combo.get()
@@ -317,6 +348,7 @@ class App(tk.Tk):
             self.login_error_label.configure(text="All fields are required.")
             return
 
+        # login() gives back a User if all three details match, otherwise None
         user = login(username, password, role)
         if not user:
             # Deliberately vague - see login()'s docstring for why.
@@ -330,6 +362,7 @@ class App(tk.Tk):
         self.build_main_app()
 
     def log_out(self):
+        """Destroys the dashboard, forgets the session and goes back to the login screen."""
         for widget in self.winfo_children():
             widget.destroy()
 
@@ -360,8 +393,11 @@ class App(tk.Tk):
     # ----------------------------------------------------------------- #
 
     def build_main_app(self):
+        """Builds the dashboard after login: header, who is logged in, the trial picker (for roles
+        with no Trials tab), the status bar and one tab for each screen the role may see."""
         build_header_bar(self, "Netball Trial Management System").pack(fill="x")
 
+        # Thin bar under the header showing who is logged in, with the Log Out button
         top_bar = ttk.Frame(self)
         top_bar.pack(fill="x", padx=10, pady=(10, 0))
         ttk.Label(
@@ -385,6 +421,7 @@ class App(tk.Tk):
             )
             self.trial_picker_combo.pack(side="left", padx=5)
             self.trial_picker_combo.bind("<<ComboboxSelected>>", self.on_trial_picker_selected)
+            # Kept so the dropdown row that is picked can be matched back to a trial id
             self._trial_picker_options = store.get_all_trials()
             self.trial_picker_combo["values"] = [
                 f"{t['trial_id']} - {t['trial_name']} ({t['age_group']})"
@@ -396,6 +433,7 @@ class App(tk.Tk):
         # whatever vertical space is left over.
         show_status_bar(self, self.status_var).pack(fill="x", side="bottom")
 
+        # The notebook holds one tab for each screen (Trials, Players, Roll Call...)
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True)
 
@@ -409,6 +447,7 @@ class App(tk.Tk):
             ("Export", "export_tab", self.build_export_tab),
         ]
 
+        # Loop over every tab; the continue below skips tabs this role may not see
         for tab_name, attr_name, build_method in tab_definitions:
             if not self.current_user.has_access(tab_name):
                 continue
@@ -418,6 +457,8 @@ class App(tk.Tk):
             build_method()
 
     def on_trial_picker_selected(self, event):
+        """Runs when a trial is picked in the dropdown (roles with no Trials tab)."""
+        # current() is the row picked in the dropdown, or -1 if nothing is picked
         index = self.trial_picker_combo.current()
         if index < 0:
             return
@@ -429,6 +470,8 @@ class App(tk.Tk):
     # ----------------------------------------------------------------- #
 
     def build_trials_tab(self):
+        """Builds the form for creating a trial and the table listing all trials."""
+        # form holds the boxes for creating a new trial
         form = ttk.Frame(self.trials_tab)
         form.pack(fill="x", padx=10, pady=10)
 
@@ -448,6 +491,7 @@ class App(tk.Tk):
         # venues run 10+ courts at once, and update_trial_courts() / the
         # Round Settings dialog let this be changed later anyway.
         ttk.Label(form, text="Courts").grid(row=3, column=0, sticky="w")
+        # IntVar holds the spinbox number; starts at 1 court
         self.num_courts_var = tk.IntVar(value=1)
         ttk.Spinbox(
             form, from_=1, to=50, textvariable=self.num_courts_var, width=6
@@ -469,6 +513,7 @@ class App(tk.Tk):
             row=5, column=0, columnspan=2, pady=10
         )
 
+        # Table of all trials; clicking a row makes it the active trial
         self.trials_tree = make_striped_treeview(
             self.trials_tab,
             columns=("name", "age_group", "date", "courts"),
@@ -481,6 +526,8 @@ class App(tk.Tk):
         self.refresh_trials_list()
 
     def create_trial(self):
+        """Checks the Trials form (required boxes, courts, birth years) and saves a new trial."""
+        # Read every box on the form; an empty box gives an empty string
         name = self.trial_name_entry.get().strip()
         age_group = self.age_group_entry.get().strip()
         date = self.trial_date_entry.get().strip()
@@ -490,6 +537,17 @@ class App(tk.Tk):
         if not name or not age_group or not date:
             messagebox.showerror("Error", "All fields are required.")
             return
+
+        # The date must be a real DD/MM/YYYY date (31/02/2026 is refused)
+        if not store.is_valid_date(date):
+            messagebox.showerror("Error", "Trial date must be a real date in DD/MM/YYYY format.")
+            return
+
+        # Refuse a second trial with the same name on the same date
+        for existing in store.get_all_trials():
+            if existing["trial_name"].lower() == name.lower() and existing["trial_date"] == date:
+                messagebox.showerror("Error", f"A trial called '{name}' on {date} already exists.")
+                return
 
         # IntVar.get() raises TclError if the Spinbox holds something that
         # isn't a whole number (e.g. cleared by hand) rather than quietly
@@ -505,6 +563,7 @@ class App(tk.Tk):
 
         # Birth years are optional, but if either is given both must be
         # given and both must actually be numbers.
+        # None means no age window, so the trial is created without a birth year check
         min_birth_year = max_birth_year = None
         if min_year_text or max_year_text:
             if not (min_year_text.isdigit() and max_year_text.isdigit()):
@@ -525,8 +584,10 @@ class App(tk.Tk):
         self.refresh_trials_list()
 
     def refresh_trials_list(self):
+        """Reloads the table of trials from the CSV file."""
         self.trials_tree.delete(*self.trials_tree.get_children())
         for t in store.get_all_trials():
+            # e.g. '2 courts' or '1 court' - the s is only added for more than one
             courts_text = f"{t['num_courts']} court{'s' if t['num_courts'] > 1 else ''}"
             self.trials_tree.insert(
                 "", "end", iid=str(t["trial_id"]),
@@ -535,6 +596,7 @@ class App(tk.Tk):
         stripe_treeview(self.trials_tree)
 
     def on_select_trial(self, event):
+        """Runs when a row in the trials table is clicked and makes that trial the active one."""
         selection = self.trials_tree.selection()
         if not selection:
             return
@@ -542,7 +604,7 @@ class App(tk.Tk):
 
     def select_trial(self, trial_id):
         """Sets the active trial and refreshes whichever tabs the current
-        role actually has (a coach/referee won't have players_tree etc,
+        role actually has (a coach won't have players_tree etc,
         since they don't get the Players tab)."""
         self.selected_trial_id = trial_id
         trial = store.get_trial(trial_id)
@@ -555,7 +617,10 @@ class App(tk.Tk):
             self.refresh_players_list()
         if hasattr(self, "roll_call_frame"):
             self.refresh_roll_call()
-        if hasattr(self, "rounds_display"):
+        # rounds_content is the Rounds tab's real widget (there is no
+        # attribute called rounds_display), so view-only roles see the saved
+        # draw as soon as they pick a trial.
+        if hasattr(self, "rounds_content"):
             self.refresh_rounds_display()
 
     # ----------------------------------------------------------------- #
@@ -563,46 +628,73 @@ class App(tk.Tk):
     # ----------------------------------------------------------------- #
 
     def build_players_tab(self):
+        """Builds the registration form (all 14 details, so walk-ons can be entered too)
+        and the table of registered players."""
         form = ttk.Frame(self.players_tab)
         form.pack(fill="x", padx=10, pady=10)
 
-        ttk.Label(form, text="First Name").grid(row=0, column=0, sticky="w")
-        self.first_name_entry = ttk.Entry(form)
-        self.first_name_entry.grid(row=0, column=1, padx=5)
-
-        ttk.Label(form, text="Last Name").grid(row=1, column=0, sticky="w")
-        self.last_name_entry = ttk.Entry(form)
-        self.last_name_entry.grid(row=1, column=1, padx=5)
-
-        ttk.Label(form, text="DOB (DD/MM/YYYY)").grid(row=2, column=0, sticky="w")
-        self.dob_entry = ttk.Entry(form)
-        self.dob_entry.grid(row=2, column=1, padx=5)
+        # (label, attribute name of the text box) for the left and right halves of the form
+        left_fields = [
+            ("First Name", "first_name_entry"), ("Last Name", "last_name_entry"),
+            ("DOB (DD/MM/YYYY)", "dob_entry"), ("Netball ID", "netball_id_entry"),
+            ("Address", "address_entry"), ("Phone", "phone_entry"), ("Email", "email_entry"),
+        ]
+        right_fields = [
+            ("Parent/Guardian Name", "parent_name_entry"), ("Parent/Guardian Phone", "parent_phone_entry"),
+            ("Parent/Guardian Email", "parent_email_entry"),
+        ]
+        for row, (label, attr) in enumerate(left_fields):
+            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            entry = ttk.Entry(form, width=30)
+            entry.grid(row=row, column=1, padx=(5, 20), pady=2)
+            setattr(self, attr, entry)
+        for row, (label, attr) in enumerate(right_fields):
+            ttk.Label(form, text=label).grid(row=row, column=2, sticky="w", pady=2)
+            entry = ttk.Entry(form, width=30)
+            entry.grid(row=row, column=3, padx=5, pady=2)
+            setattr(self, attr, entry)
         self.dob_entry.bind("<KeyRelease>", self.on_dob_typed)
+
+        # Read-only dropdowns, so only the seven real positions can be picked
+        for row, (label, attr) in enumerate(
+                [("Position 1", "pos1_combo"), ("Position 2", "pos2_combo"), ("Position 3", "pos3_combo")],
+                start=3):
+            ttk.Label(form, text=label).grid(row=row, column=2, sticky="w", pady=2)
+            combo = ttk.Combobox(form, values=POSITIONS, state="readonly", width=10)
+            combo.grid(row=row, column=3, padx=5, pady=2, sticky="w")
+            setattr(self, attr, combo)
+
+        ttk.Label(form, text="Playing History").grid(row=6, column=2, sticky="w", pady=2)
+        self.playing_history_entry = ttk.Entry(form, width=30)
+        self.playing_history_entry.grid(row=6, column=3, padx=5, pady=2)
 
         # Live feedback as the coordinator types - informational only,
         # never blocks registration, since a permit might apply.
         self.dob_validation_label = ttk.Label(form, text="", style="Valid.TLabel")
-        self.dob_validation_label.grid(row=2, column=2, sticky="w", padx=5)
-
-        ttk.Label(form, text="Position 1").grid(row=3, column=0, sticky="w")
-        self.pos1_combo = ttk.Combobox(form, values=POSITIONS, state="readonly")
-        self.pos1_combo.grid(row=3, column=1, padx=5)
-
-        ttk.Label(form, text="Position 2").grid(row=4, column=0, sticky="w")
-        self.pos2_combo = ttk.Combobox(form, values=POSITIONS, state="readonly")
-        self.pos2_combo.grid(row=4, column=1, padx=5)
+        self.dob_validation_label.grid(row=7, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         ttk.Button(
             form, text="Register Player", style="Primary.TButton", command=self.create_player
-        ).grid(row=5, column=0, columnspan=2, pady=10)
+        ).grid(row=8, column=0, columnspan=4, pady=8)
 
+        # Table of everyone registered for the selected trial, with every detail
+        # (scrollbars because there are too many columns to fit the window)
+        table_frame = ttk.Frame(self.players_tab)
+        table_frame.pack(fill="both", expand=True, padx=10, pady=10)
         self.players_tree = make_striped_treeview(
-            self.players_tab,
-            columns=("trial_no", "name", "dob", "pos1", "pos2"),
-            headings=["#", "Name", "DOB", "Pos 1", "Pos 2"],
-            widths=[40, 200, 100, 70, 70],
+            table_frame,
+            columns=("trial_no", "name", "dob", "netball_id", "address", "phone", "email",
+                     "parent_name", "parent_phone", "parent_email", "pos1", "pos2", "pos3", "history"),
+            headings=["#", "Name", "DOB", "Netball ID", "Address", "Phone", "Email",
+                      "Parent/Guardian", "Parent Phone", "Parent Email", "Pos 1", "Pos 2", "Pos 3", "Playing History"],
+            widths=[40, 160, 90, 90, 200, 100, 180, 140, 100, 180, 50, 50, 50, 250],
         )
-        self.players_tree.pack(fill="both", expand=True, padx=10, pady=10)
+        y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.players_tree.yview)
+        x_scroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.players_tree.xview)
+        self.players_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        y_scroll.pack(side="right", fill="y")
+        x_scroll.pack(side="bottom", fill="x")
+        self.players_tree.pack(fill="both", expand=True)
 
     def on_dob_typed(self, event=None):
         """Checks the DOB typed so far against the selected trial's birth
@@ -634,34 +726,78 @@ class App(tk.Tk):
         )
 
     def create_player(self):
+        """Checks the registration form and saves a new player for the selected trial."""
         if not self.selected_trial_id:
             messagebox.showerror("Error", "Select a trial first (on the Trials tab).")
             return
 
-        first_name = self.first_name_entry.get().strip()
-        last_name = self.last_name_entry.get().strip()
-        dob = self.dob_entry.get().strip()
-        pos1 = self.pos1_combo.get()
-        pos2 = self.pos2_combo.get()
+        # Read the form; pos1 to pos3 are the position codes picked in the dropdowns
+        details = {
+            "first_name": self.first_name_entry.get().strip(),
+            "last_name": self.last_name_entry.get().strip(),
+            "dob": self.dob_entry.get().strip(),
+            "netball_id": self.netball_id_entry.get().strip(),
+            "address": self.address_entry.get().strip(),
+            "phone": self.phone_entry.get().strip(),
+            "email": self.email_entry.get().strip(),
+            "parent_name": self.parent_name_entry.get().strip(),
+            "parent_phone": self.parent_phone_entry.get().strip(),
+            "parent_email": self.parent_email_entry.get().strip(),
+            "playing_history": self.playing_history_entry.get().strip(),
+            "position_1": self.pos1_combo.get(),
+            "position_2": self.pos2_combo.get(),
+            "position_3": self.pos3_combo.get(),
+        }
 
-        if not first_name or not last_name or not dob or not pos1 or not pos2:
+        # Every one of the 14 details is needed, even for a walk-on
+        if not all(details.values()):
             messagebox.showerror("Error", "All fields are required.")
             return
 
-        if not store.is_valid_date(dob):
+        if not store.is_valid_date(details["dob"]):
             messagebox.showerror("Error", "DOB must be in DD/MM/YYYY format.")
             return
+        if store.is_future_date(details["dob"]):
+            messagebox.showerror("Error", "Date of birth can't be in the future.")
+            return
+        if len({details["position_1"], details["position_2"], details["position_3"]}) < 3:
+            messagebox.showerror("Error", "Position 1, Position 2 and Position 3 must all be different.")
+            return
+        if any(ch.isdigit() for ch in details["first_name"] + details["last_name"]):
+            messagebox.showerror("Error", "Names can't contain numbers.")
+            return
+        for label, key in (("Phone", "phone"), ("Parent/Guardian Phone", "parent_phone")):
+            if not store.is_valid_phone(details[key]):
+                messagebox.showerror("Error", f"{label} must be an Australian number, e.g. 0412 345 678.")
+                return
+        for label, key in (("Email", "email"), ("Parent/Guardian Email", "parent_email")):
+            if not store.is_valid_email(details[key]):
+                messagebox.showerror("Error", f"{label} must look like name@example.com.")
+                return
+        if len(details["playing_history"]) > PLAYING_HISTORY_MAX_CHARS:
+            messagebox.showerror("Error", f"Playing history can be at most {PLAYING_HISTORY_MAX_CHARS} characters.")
+            return
 
+        # create_player() saves the row and gives back the number this player wears in the trial
         trial_number = store.create_player(
-            self.selected_trial_id, first_name, last_name, dob, pos1, pos2
+            self.selected_trial_id, details["first_name"], details["last_name"], details["dob"],
+            details["position_1"], details["position_2"],
+            netball_id=details["netball_id"], address=details["address"], phone=details["phone"],
+            email=details["email"], parent_name=details["parent_name"],
+            parent_phone=details["parent_phone"], parent_email=details["parent_email"],
+            playing_history=details["playing_history"], position_3=details["position_3"],
         )
 
-        self.first_name_entry.delete(0, "end")
-        self.last_name_entry.delete(0, "end")
-        self.dob_entry.delete(0, "end")
+        # Empty every box ready for the next player
+        for entry in (
+            self.first_name_entry, self.last_name_entry, self.dob_entry, self.netball_id_entry,
+            self.address_entry, self.phone_entry, self.email_entry, self.parent_name_entry,
+            self.parent_phone_entry, self.parent_email_entry, self.playing_history_entry,
+        ):
+            entry.delete(0, "end")
         self.dob_validation_label.configure(text="")
-        self.pos1_combo.set("")
-        self.pos2_combo.set("")
+        for combo in (self.pos1_combo, self.pos2_combo, self.pos3_combo):
+            combo.set("")
 
         messagebox.showinfo("Registered", f"Player registered. Trial number: {trial_number}")
 
@@ -669,9 +805,11 @@ class App(tk.Tk):
         self.refresh_roll_call()
 
     def refresh_players_list(self):
+        """Reloads the players table for the selected trial."""
         self.players_tree.delete(*self.players_tree.get_children())
         if not self.selected_trial_id:
             return
+        # players is a list of dicts (one per player) sorted by trial number
         players = store.get_players_for_trial(self.selected_trial_id)
         for p in players:
             self.players_tree.insert(
@@ -679,9 +817,9 @@ class App(tk.Tk):
                 values=(
                     f"#{p['trial_number']}",
                     f"{p['first_name']} {p['last_name']}",
-                    p["dob"],
-                    p["position_1"],
-                    p["position_2"],
+                    p["dob"], p["netball_id"], p["address"], p["phone"], p["email"],
+                    p["parent_name"], p["parent_phone"], p["parent_email"],
+                    p["position_1"], p["position_2"], p["position_3"], p["playing_history"],
                 ),
             )
         stripe_treeview(self.players_tree)
@@ -691,10 +829,13 @@ class App(tk.Tk):
     # ----------------------------------------------------------------- #
 
     def build_roll_call_tab(self):
+        """Builds the search box, Select All / Clear All buttons, the scrolling tick list and
+        the Confirm Roll Call button."""
         ttk.Label(
             self.roll_call_tab, text="Tick each player who is present for this trial:"
         ).pack(anchor="w", padx=10, pady=(10, 0))
 
+        # Search box: filters the list below by name or trial number as you type
         search_frame = ttk.Frame(self.roll_call_tab)
         search_frame.pack(fill="x", padx=10, pady=(6, 0))
         ttk.Label(search_frame, text="Search:").pack(side="left")
@@ -731,13 +872,16 @@ class App(tk.Tk):
         self._visible_player_ids = []
 
     def refresh_roll_call(self):
+        """Reloads the players and their saved ticks for the selected trial, then redraws the list."""
         self.attendance_vars = {}
+        # Players for the selected trial; _visible_player_ids (below) are the ones shown after filtering, used by Select All / Clear All
         self._roll_call_players = []
         if hasattr(self, "roll_call_search_var"):
             self.roll_call_search_var.set("")
 
         if self.selected_trial_id:
             self._roll_call_players = store.get_players_for_trial(self.selected_trial_id)
+            # existing is {player_id: 0 or 1} from the last saved roll call, so ticks come back when a trial is reopened
             existing = store.get_attendance_map(self.selected_trial_id)
             for p in self._roll_call_players:
                 self.attendance_vars[p["player_id"]] = tk.IntVar(
@@ -754,6 +898,7 @@ class App(tk.Tk):
         for widget in self.roll_call_frame.winfo_children():
             widget.destroy()
 
+        # What is typed in the search box, lower case so capitals do not matter
         query = self.roll_call_search_var.get().strip().lower() if hasattr(self, "roll_call_search_var") else ""
         # A purely numeric search means "trial number", and should match
         # exactly - typing 99 shouldn't also pull in #199, #299, etc.
@@ -781,14 +926,17 @@ class App(tk.Tk):
             ).pack(anchor="w", pady=6)
 
     def select_all_present(self):
+        """Ticks every player currently shown (so it respects the search filter)."""
         for player_id in self._visible_player_ids:
             self.attendance_vars[player_id].set(1)
 
     def clear_all_present(self):
+        """Un-ticks every player currently shown (so it respects the search filter)."""
         for player_id in self._visible_player_ids:
             self.attendance_vars[player_id].set(0)
 
     def confirm_roll_call(self):
+        """Saves each player's tick to the Attendance file and tells the user how many are present."""
         if not self.selected_trial_id:
             messagebox.showerror("Error", "Select a trial first (on the Trials tab).")
             return
@@ -796,6 +944,7 @@ class App(tk.Tk):
         for player_id, var in self.attendance_vars.items():
             store.set_attendance(player_id, self.selected_trial_id, bool(var.get()))
 
+        # Counts the ticked boxes (var.get() is 1 when ticked)
         present_count = sum(1 for var in self.attendance_vars.values() if var.get())
         messagebox.showinfo("Roll Call Saved", f"{present_count} players marked present.")
 
@@ -804,23 +953,33 @@ class App(tk.Tk):
     # ----------------------------------------------------------------- #
 
     def build_rounds_tab(self):
+        """Builds the Rounds tab. Only roles that can edit it get the Generate and Settings buttons."""
         form = ttk.Frame(self.rounds_tab)
         form.pack(fill="x", padx=10, pady=10)
 
-        ttk.Button(
-            form, text="Round Settings…", command=self.open_round_settings_dialog
-        ).pack(side="left")
-        ttk.Button(
-            form, text="Generate Rounds", style="Primary.TButton", command=self.generate_rounds
-        ).pack(side="left", padx=(8, 0))
+        # Only roles allowed to edit the Rounds tab get the buttons that
+        # change the draw; everyone else just reads it.
+        if self.current_user.can_edit("Rounds"):
+            ttk.Button(
+                form, text="Round Settings…", command=self.open_round_settings_dialog
+            ).pack(side="left")
+            ttk.Button(
+                form, text="Generate Rounds", style="Primary.TButton", command=self.generate_rounds
+            ).pack(side="left", padx=(8, 0))
 
-        ttk.Label(
-            self.rounds_tab,
-            text="Automatically generates the fewest rounds needed so every present player "
-                 "gets at least one game in their 1st preference and one in their 2nd "
-                 "preference position. Use Round Settings to confirm the number of courts "
-                 "and each team's bib colour before generating.",
-        ).pack(anchor="w", padx=10)
+            ttk.Label(
+                self.rounds_tab,
+                text="Automatically generates the fewest rounds needed so every present player "
+                     "gets at least one game in their 1st preference and one in their 2nd "
+                     "preference position. Use Round Settings to confirm the number of courts "
+                     "and each team's bib colour before generating.",
+            ).pack(anchor="w", padx=10)
+        else:
+            ttk.Label(
+                self.rounds_tab,
+                text="View only: you can see the draw but not change it.",
+                style="Status.TLabel",
+            ).pack(anchor="w", padx=10)
 
         nav = ttk.Frame(self.rounds_tab)
         nav.pack(fill="x", padx=10, pady=(10, 0))
@@ -832,6 +991,7 @@ class App(tk.Tk):
         order_row = ttk.Frame(self.rounds_tab)
         order_row.pack(fill="x", padx=10, pady=(8, 0))
         ttk.Label(order_row, text="Team B Order:").pack(side="left")
+        # 'positional' lines Team B up GS-GS; 'matchup' reverses it so GS faces GK
         self.round_order_mode = tk.StringVar(value="positional")
         ttk.Radiobutton(
             order_row, text="Positional (GS-GS)", variable=self.round_order_mode,
@@ -856,13 +1016,18 @@ class App(tk.Tk):
     def open_round_settings_dialog(self):
         """Lets the coordinator confirm/change the number of courts and
         each court/team's bib colour before generating a round."""
+        if not self.current_user.can_edit("Rounds"):
+            messagebox.showerror("Not allowed", "Only a coordinator can change the draw.")
+            return
         if not self.selected_trial_id:
             messagebox.showerror("Error", "Select a trial first (on the Trials tab).")
             return
 
         trial = store.get_trial(self.selected_trial_id)
+        # Colours saved earlier for this trial, or {} so the defaults are used
         saved_colours = store.get_trial_bib_colours(self.selected_trial_id) or {}
 
+        # Toplevel is a pop-up window; grab_set() below stops the main window being used until it closes
         dialog = tk.Toplevel(self)
         dialog.title("Round Settings")
         dialog.configure(bg=WHITE)
@@ -875,6 +1040,7 @@ class App(tk.Tk):
         ttk.Label(container, text="Courts", style="SubHeader.TLabel").grid(
             row=0, column=0, sticky="w"
         )
+        # Starts on the trial's current number of courts
         courts_var = tk.IntVar(value=trial["num_courts"])
         courts_spin = ttk.Spinbox(
             container, from_=1, to=50, textvariable=courts_var, width=6,
@@ -905,15 +1071,18 @@ class App(tk.Tk):
         rows_canvas.pack(side="left", fill="both", expand=True)
         rows_scrollbar.pack(side="right", fill="y")
 
+        # Holds the colour boxes so their text can be read when Save is pressed
         colour_entries = {}  # court_number -> {"A": Entry, "B": Entry}, current dialog state
 
         def default_colour(court_number, team):
+            """Returns the colour to pre-fill for a team: the saved one if there is one, otherwise the default."""
             existing = saved_colours.get(court_number, {})
             if team in existing:
                 return existing[team]
             return algorithm.bib_colours_for_court(court_number)[team]
 
         def rebuild_colour_rows():
+            """Redraws the bib colour boxes to match the number of courts, keeping anything already typed."""
             try:
                 num_courts = courts_var.get()
             except tk.TclError:
@@ -953,6 +1122,7 @@ class App(tk.Tk):
         error_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         def save_settings():
+            """Checks the courts and colour boxes, then saves them to the trial and closes the dialog."""
             try:
                 num_courts = courts_var.get()
             except tk.TclError:
@@ -993,17 +1163,30 @@ class App(tk.Tk):
         ).pack(side="left")
 
     def generate_rounds(self):
+        """Runs the rotation algorithm for the players marked present and saves the draw,
+        replacing any earlier draw for this trial."""
+        if not self.current_user.can_edit("Rounds"):
+            messagebox.showerror("Not allowed", "Only a coordinator can change the draw.")
+            return
         if not self.selected_trial_id:
             messagebox.showerror("Error", "Select a trial first (on the Trials tab).")
             return
 
+        # Ask before replacing a draw that already exists
+        if store.get_rounds_for_trial(self.selected_trial_id) and not messagebox.askyesno(
+                "Replace Draw", "This trial already has a draw. Generating again will replace it. Continue?"):
+            return
+
         trial = store.get_trial(self.selected_trial_id)
         num_courts = trial["num_courts"]
+        # Colours chosen in Round Settings, or {} to use the default colours
         confirmed_colours = store.get_trial_bib_colours(self.selected_trial_id) or {}
 
+        # Only players ticked present on the roll call go into the draw
         present_players = store.get_present_players(self.selected_trial_id)
 
         try:
+            # rounds_output = every team's line-up, rounds_used = number of rounds, failed = players who missed a preferred position (empty is good)
             rounds_output, rounds_used, failed = algorithm.generate_minimum_rounds(
                 present_players, num_courts
             )
@@ -1011,6 +1194,7 @@ class App(tk.Tk):
             messagebox.showerror("Cannot Generate Rounds", str(e))
             return
 
+        # Remove the old draw first so the new one replaces it
         store.clear_rounds_for_trial(self.selected_trial_id)
 
         for round_data in rounds_output:
@@ -1056,6 +1240,7 @@ class App(tk.Tk):
                 self._rounds_by_number.setdefault(r["round_number"], {}) \
                     .setdefault(r["court_number"], {})[r["team"]] = r
 
+        # Sorted list of the round numbers that exist, e.g. [1, 2, 3]
         round_numbers = sorted(self._rounds_by_number.keys())
         if not round_numbers:
             self.current_round_number = None
@@ -1069,6 +1254,7 @@ class App(tk.Tk):
         self.render_round(self.current_round_number)
 
     def on_round_order_changed(self):
+        """Redraws the current round when the Team B order option is changed."""
         if self.current_round_number is not None:
             self.render_round(self.current_round_number)
 
@@ -1093,6 +1279,7 @@ class App(tk.Tk):
             widget.destroy()
         self._court_anchors = {}
 
+        # courts is {court_number: {team: round row}} for this round
         courts = self._rounds_by_number[round_number]
         court_numbers = sorted(courts.keys())
 
@@ -1156,10 +1343,12 @@ class App(tk.Tk):
         total_height = self.rounds_content.winfo_height()
         if total_height <= 0:
             return
+        # How far down the content the court heading is: 0.0 is the top, 1.0 the bottom
         fraction = widget.winfo_y() / total_height
         canvas.yview_moveto(max(0.0, min(fraction, 1.0)))
 
     def prev_round(self):
+        """Shows the previous round, if there is one."""
         round_numbers = sorted(self._rounds_by_number.keys())
         if not round_numbers or self.current_round_number is None:
             return
@@ -1168,6 +1357,7 @@ class App(tk.Tk):
             self.render_round(round_numbers[index - 1])
 
     def next_round(self):
+        """Shows the next round, if there is one."""
         round_numbers = sorted(self._rounds_by_number.keys())
         if not round_numbers or self.current_round_number is None:
             return
@@ -1180,6 +1370,7 @@ class App(tk.Tk):
     # ----------------------------------------------------------------- #
 
     def build_export_tab(self):
+        """Builds the Export Players, game sheet, reference sheet and Back Up Data Now buttons."""
         ttk.Label(
             self.export_tab,
             text="Exports the full player register for the selected trial as a clean CSV file.",
@@ -1194,6 +1385,22 @@ class App(tk.Tk):
 
         ttk.Label(
             self.export_tab,
+            text="Once the rounds are generated: a printable PDF with one selection sheet per court per round, "
+                 "and a CSV showing where each player is in every round.",
+        ).pack(anchor="w", padx=10)
+        ttk.Button(
+            self.export_tab, text="Export Game Sheets (PDF)", style="Primary.TButton",
+            command=self.export_game_sheets
+        ).pack(anchor="w", padx=10, pady=(5, 0))
+        ttk.Button(
+            self.export_tab, text="Export Player Reference Sheet", style="Primary.TButton",
+            command=self.export_reference_sheet
+        ).pack(anchor="w", padx=10, pady=(5, 0))
+
+        ttk.Separator(self.export_tab, orient="horizontal").pack(fill="x", padx=10, pady=15)
+
+        ttk.Label(
+            self.export_tab,
             text="A dated backup is taken automatically every time the app starts. "
                  "You can also trigger one right now:",
         ).pack(anchor="w", padx=10)
@@ -1202,6 +1409,7 @@ class App(tk.Tk):
         ).pack(anchor="w", padx=10, pady=(5, 0))
 
     def export_players_csv(self):
+        """Asks where to save, then writes the selected trial's players to a CSV file."""
         if not self.selected_trial_id:
             messagebox.showerror("Error", "Select a trial first (on the Trials tab).")
             return
@@ -1212,6 +1420,7 @@ class App(tk.Tk):
             return
 
         trial = store.get_trial(self.selected_trial_id)
+        # Suggested file name, with spaces swapped for underscores
         default_name = f"{trial['trial_name'].replace(' ', '_')}_players.csv"
 
         filepath = filedialog.asksaveasfilename(
@@ -1222,10 +1431,55 @@ class App(tk.Tk):
         if not filepath:
             return
 
-        store.export_players_csv(players, filepath)
+        # A file open in Excel is locked, so show a message instead of crashing
+        try:
+            store.export_players_csv(players, filepath)
+        except OSError:
+            messagebox.showerror("Export Failed", "Could not save the file. If it is open in Excel, close it and try again.")
+            return
         messagebox.showinfo("Export Complete", f"Player list exported to:\n{filepath}")
 
+    def export_draw_file(self, default_name, extension, file_label, writer, done_message):
+        """Shared by the two draw exports: checks a draw exists, asks where to save,
+        calls writer(trial_id, filepath) and reports success or the problem."""
+        if not self.selected_trial_id:
+            messagebox.showerror("Error", "Select a trial first (on the Trials tab).")
+            return
+        if not store.get_rounds_for_trial(self.selected_trial_id):
+            messagebox.showerror("Error", "Generate the rounds first (on the Rounds tab).")
+            return
+
+        trial = store.get_trial(self.selected_trial_id)
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=extension,
+            initialfile=f"{trial['trial_name'].replace(' ', '_')}_{default_name}{extension}",
+            filetypes=[(file_label, "*" + extension)],
+        )
+        if not filepath:
+            return
+
+        try:
+            writer(self.selected_trial_id, filepath)
+        except OSError:
+            messagebox.showerror("Export Failed", "Could not save the file. If it is open in another program, close it and try again.")
+            return
+        except ImportError:
+            messagebox.showerror("Export Failed", "The PDF library (reportlab) is not installed. Run: pip install reportlab")
+            return
+        messagebox.showinfo("Export Complete", f"{done_message}\n{filepath}")
+
+    def export_game_sheets(self):
+        """Saves every round's selection sheets as one printable PDF."""
+        self.export_draw_file("game_sheets", ".pdf", "PDF files",
+                              store.export_game_sheets_pdf, "Game sheets saved to:")
+
+    def export_reference_sheet(self):
+        """Saves the player-by-round reference table as a CSV file."""
+        self.export_draw_file("reference_sheet", ".csv", "CSV files",
+                              store.export_reference_sheet_csv, "Player reference sheet saved to:")
+
     def backup_data_now(self):
+        """Makes a dated copy of the data folder and tells the user where it went."""
         backup_path = store.backup_data()
         if backup_path:
             messagebox.showinfo("Backup Complete", f"Data backed up to:\n{backup_path}")
