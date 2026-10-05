@@ -29,30 +29,42 @@ import re
 import shutil
 from datetime import datetime
 
-# Folder holding all the CSV files
+# Folder holding all the CSV files. Plain CSV files in one folder, not a database: the club
+# can open them in Excel, and copying this one folder is a complete backup.
 DATA_DIR = "data"
 # Folder where dated copies of data/ are kept
 BACKUP_DIR = "backups"
 
+# One index file lists every trial. Each trial's players, roll call and rounds go in their
+# own folder (see _trial_dir), so one trial is easy to find and read on its own.
 TRIALS_CSV = os.path.join(DATA_DIR, "trials.csv")
+# Login accounts are in their own CSV, away from the player data. Only salted hashes are
+# stored here, never the passwords themselves.
 USERS_CSV = os.path.join(DATA_DIR, "users.csv")
 
-# Column names of each CSV file, in the order they are written; the first column is its id
+# Column names of each CSV file, in the order they are written; the first column is its id.
+# Each is a list, not a set or dictionary, because a CSV needs its columns in a fixed order.
+# The same list writes the header row and picks each row's values.
 TRIALS_FIELDS = [
     "trial_id", "trial_name", "age_group", "trial_date", "num_courts",
     "min_birth_year", "max_birth_year", "bib_colours_json",
 ]
+# dob, phone and parent_phone are kept as text. A phone number starts with 0 and a number
+# type would drop it. dob is typed and shown as DD/MM/YYYY, so it stays as that text.
 PLAYERS_FIELDS = [
     "player_id", "trial_id", "trial_number", "first_name", "last_name", "dob",
     "netball_id", "address", "phone", "email", "parent_name", "parent_phone",
     "parent_email", "playing_history", "position_1", "position_2", "position_3",
 ]
+# is_present is 1 or 0, not True or False, because a CSV cell holds text and the roll call
+# tick box reads and writes 1 or 0.
 ATTENDANCE_FIELDS = ["attendance_id", "player_id", "trial_id", "is_present"]
 ROUNDS_FIELDS = ["round_id", "trial_id", "round_number", "court_number", "team", "bib_colour"]
 ASSIGNMENTS_FIELDS = ["assignment_id", "round_id", "player_id", "position"]
 USERS_FIELDS = ["user_id", "username", "password_hash", "salt", "role"]
 
-# The seven netball positions
+# The seven netball positions, as text codes because that is what the club writes down. A list
+# keeps court order GS to GK, and `x in POSITIONS` checks that a typed position is real.
 POSITIONS = ["GS", "GA", "WA", "C", "WD", "GD", "GK"]
 
 
@@ -74,11 +86,13 @@ def _new_salt():
 def _read_table(path, int_fields=(), optional_int_fields=()):
     """Reads a CSV file into a list of dicts. Columns in int_fields become whole numbers;
     optional_int_fields become a number or None if blank. Returns [] if the file is missing."""
+    # A missing file is treated as an empty table
     if not os.path.exists(path):
         return []
     with open(path, newline="", encoding="utf-8") as f:
         # Every row is a dict of text; the loops below turn the number columns into ints
         rows = list(csv.DictReader(f))
+    # Convert the number columns of every row from text to int (a blank optional one becomes None)
     for row in rows:
         for field in int_fields:
             row[field] = int(row[field])
@@ -95,6 +109,7 @@ def _write_table(path, fieldnames, rows):
         # DictWriter writes each dict in the column order given by fieldnames
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
+        # One line per row; None is written as an empty cell
         for row in rows:
             writer.writerow({
                 field: ("" if row.get(field) is None else row.get(field, ""))
@@ -104,6 +119,7 @@ def _write_table(path, fieldnames, rows):
 
 def _next_id(rows, id_field):
     """Returns the next unused id: one more than the biggest existing id (1 if there are none)."""
+    # An empty table starts at id 1
     if not rows:
         return 1
     # One more than the biggest id, so ids are never reused
@@ -141,6 +157,7 @@ def init_data():
     Assignments files live in that trial's own folder instead - see
     create_trial()."""
     os.makedirs(DATA_DIR, exist_ok=True)
+    # Create each index file with only its header row if it is not there yet
     for path, fields in (
         (TRIALS_CSV, TRIALS_FIELDS),
         (USERS_CSV, USERS_FIELDS),
@@ -162,9 +179,12 @@ def init_data():
         _write_table(USERS_CSV, USERS_FIELDS, users)
 
 
+# A complete backup is just a copy of the data folder, because that folder holds every CSV
+# there is. The date and time in the name means an old backup is never overwritten.
 def backup_data():
     """Copies data/ into backups/ with a timestamped folder name. Returns
     the backup path, or None if there's no data yet to back up."""
+    # Nothing to back up before the data folder exists
     if not os.path.exists(DATA_DIR):
         return None
     os.makedirs(BACKUP_DIR, exist_ok=True)
@@ -181,6 +201,7 @@ def backup_data():
 
 def is_valid_date(date_str):
     """Returns True if the text is a real date written DD/MM/YYYY (31/02/2026 is not)."""
+    # strptime raises ValueError for a date that is not real or not DD/MM/YYYY (AttributeError if not text)
     try:
         datetime.strptime(date_str.strip(), "%d/%m/%Y")
         return True
@@ -215,12 +236,15 @@ def is_valid_email(text):
 def check_dob_eligibility(dob_str, min_birth_year, max_birth_year):
     """Checks a DOB against a trial's birth year window. Informational
     only - never blocks registration, since a permit can override it."""
+    # Type check first: the year can't be read from a bad date
     if not is_valid_date(dob_str):
         return False, "Invalid date format (use DD/MM/YYYY)"
+    # No window set for the trial: every date of birth is accepted
     if min_birth_year is None or max_birth_year is None:
         return True, "No age window set for this trial"
     # Only the birth year matters for the age window
     year = birth_year_of(dob_str)
+    # Range check: the birth year must be inside the window (both ends included)
     if min_birth_year <= year <= max_birth_year:
         return True, f"✓ Valid ({year} is within {min_birth_year}–{max_birth_year})"
     return False, f"⚠ Outside range ({year} not in {min_birth_year}–{max_birth_year}) - permit required"
@@ -287,6 +311,7 @@ def get_trial(trial_id):
 def update_trial_courts(trial_id, num_courts):
     """Changes the number of courts for one trial."""
     trials = _read_trials()
+    # Find the trial with this id and change its number of courts
     for t in trials:
         if t["trial_id"] == trial_id:
             t["num_courts"] = num_courts
@@ -297,16 +322,22 @@ def get_trial_bib_colours(trial_id):
     """Returns {court_number: {"A": colour, "B": colour}}, or None if
     nothing's been confirmed yet."""
     trial = get_trial(trial_id)
+    # No trial, or no colours saved yet
     if not trial or not trial.get("bib_colours_json"):
         return None
     raw = json.loads(trial["bib_colours_json"])
     return {int(court): teams for court, teams in raw.items()}
 
 
+# Bib colours are a dictionary inside a dictionary (court -> team -> colour), which won't fit
+# in one CSV cell. So they are saved as JSON text in one cell of trials.csv: no extra file for
+# a few words, and json.loads() gives the dictionary back. JSON turns the court numbers into
+# text, so get_trial_bib_colours() turns them back into whole numbers.
 def set_trial_bib_colours(trial_id, bib_colours):
     """Saves the bib colours for a trial as JSON text: {court: {"A": colour, "B": colour}}."""
     payload = json.dumps({str(court): teams for court, teams in bib_colours.items()})
     trials = _read_trials()
+    # Find the trial with this id and store the JSON text on it
     for t in trials:
         if t["trial_id"] == trial_id:
             t["bib_colours_json"] = payload
@@ -320,6 +351,7 @@ def set_trial_bib_colours(trial_id, bib_colours):
 def _read_players(trial_id):
     """Reads the Players file for one trial ([] if the trial does not exist)."""
     trial = get_trial(trial_id)
+    # An unknown trial id has no file to read
     if not trial:
         return []
     return _read_table(_trial_file(trial, "Players"), int_fields=["player_id", "trial_id", "trial_number"])
@@ -328,6 +360,7 @@ def _read_players(trial_id):
 def _write_players(trial_id, rows):
     """Writes the Players file for one trial."""
     trial = get_trial(trial_id)
+    # Only write if the trial exists (the file path is built from the trial)
     if trial:
         _write_table(_trial_file(trial, "Players"), PLAYERS_FIELDS, rows)
 
@@ -382,6 +415,7 @@ def get_players_for_trial(trial_id):
 def _read_attendance(trial_id):
     """Reads the Attendance file for one trial."""
     trial = get_trial(trial_id)
+    # An unknown trial id has no file to read
     if not trial:
         return []
     return _read_table(
@@ -393,6 +427,7 @@ def _read_attendance(trial_id):
 def _write_attendance(trial_id, rows):
     """Writes the Attendance file for one trial."""
     trial = get_trial(trial_id)
+    # Only write if the trial exists (the file path is built from the trial)
     if trial:
         _write_table(_trial_file(trial, "Attendance"), ATTENDANCE_FIELDS, rows)
 
@@ -430,6 +465,7 @@ def get_present_players(trial_id):
 def _read_rounds(trial_id):
     """Reads the Rounds file for one trial (one row per team per round)."""
     trial = get_trial(trial_id)
+    # An unknown trial id has no file to read
     if not trial:
         return []
     return _read_table(
@@ -441,6 +477,7 @@ def _read_rounds(trial_id):
 def _write_rounds(trial_id, rows):
     """Writes the Rounds file for one trial."""
     trial = get_trial(trial_id)
+    # Only write if the trial exists (the file path is built from the trial)
     if trial:
         _write_table(_trial_file(trial, "Rounds"), ROUNDS_FIELDS, rows)
 
@@ -448,6 +485,7 @@ def _write_rounds(trial_id, rows):
 def _read_assignments(trial_id):
     """Reads the Assignments file for one trial (who plays which position in which round)."""
     trial = get_trial(trial_id)
+    # An unknown trial id has no file to read
     if not trial:
         return []
     return _read_table(
@@ -459,6 +497,7 @@ def _read_assignments(trial_id):
 def _write_assignments(trial_id, rows):
     """Writes the Assignments file for one trial."""
     trial = get_trial(trial_id)
+    # Only write if the trial exists (the file path is built from the trial)
     if trial:
         _write_table(_trial_file(trial, "Assignments"), ASSIGNMENTS_FIELDS, rows)
 
@@ -508,6 +547,7 @@ def get_assignments_for_round(trial_id, round_id):
     # Lookup of {player_id: player} so names can be added to each assignment without searching
     players_by_id = {p["player_id"]: p for p in _read_players(trial_id)}
     rows = []
+    # Keep only this round's assignments and add the player's name and number to each
     for a in _read_assignments(trial_id):
         if a["round_id"] != round_id:
             continue
@@ -551,22 +591,26 @@ def get_user_by_username(username):
 # CSV export - clean player register, for the Export tab
 # --------------------------------------------------------------------------- #
 
-# Column titles written at the top of the exported CSV
+# Column titles written at the top of the exported CSV. A list, because the order is the
+# column order; heading 1 goes with field 1 of PLAYER_FIELD_ORDER, and so on.
 CSV_HEADERS = ["Trial No", "First Name", "Last Name", "DOB", "Position 1", "Position 2"]
 
-# Which player fields go in each column, in the same order as CSV_HEADERS
+# Which player fields go in each column, in the same order as CSV_HEADERS. Two matching lists,
+# so the readable headings can differ from the stored field names but stay in column order.
 PLAYER_FIELD_ORDER = ["trial_number", "first_name", "last_name", "dob", "position_1", "position_2"]
 
 
 def export_players_csv(players, filepath):
     """Writes the given players to a clean CSV (header row + one row per player) and returns the path."""
     directory = os.path.dirname(filepath)
+    # Make the folder if the path has one (a bare file name has no folder)
     if directory:
         os.makedirs(directory, exist_ok=True)
 
     with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(CSV_HEADERS)
+        # One row per player, with the fields in the same order as the headings
         for p in players:
             row = [p.get(field, "") for field in PLAYER_FIELD_ORDER]
             writer.writerow(row)
@@ -584,6 +628,7 @@ def export_trial_csv(trial_id):
     so there's always an up-to-date CSV on disk without needing to press
     the Export tab's button."""
     trial = get_trial(trial_id)
+    # Unknown trial id: nothing to export
     if not trial:
         return None
     safe_name = trial["trial_name"].replace(" ", "_") or f"trial_{trial_id}"
@@ -607,8 +652,10 @@ def get_draw(trial_id):
         by_round.setdefault(a["round_id"], []).append(a)
 
     draw = []
+    # For each team in the draw, build its line-up and sort it into court order GS to GK
     for r in get_rounds_for_trial(trial_id):
         lineup = []
+        # Copy each player's details and add the position they play in this round
         for a in by_round.get(r["round_id"], []):
             player = dict(players_by_id.get(a["player_id"], {}))
             player["position"] = a["position"]
@@ -640,6 +687,7 @@ def export_game_sheets_pdf(trial_id, filepath):
 
     trial = get_trial(trial_id)
     draw = get_draw(trial_id)
+    # Nothing to print without a trial and a saved draw
     if not trial or not draw:
         raise ValueError("This trial has no draw yet.")
 
@@ -654,6 +702,7 @@ def export_game_sheets_pdf(trial_id, filepath):
 
     def team_table(team):
         """Builds one team's table: title bar, header row, then a player row and notes row per position."""
+        # toColor raises ValueError for a colour name reportlab does not know
         try:
             bg = colors.toColor(team["bib_colour"])
         except ValueError:
@@ -672,6 +721,7 @@ def export_game_sheets_pdf(trial_id, filepath):
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("FONTSIZE", (0, 0), (-1, -1), 9),
         ]
+        # Two rows per player: position, name and rating, then a Notes/Feedback row across the full width
         for p in team["players"]:
             name = escape(_player_name(p)) + f" - ({p.get('trial_number', '')})"
             prefs = f"({p.get('position_1', '')} | {p.get('position_2', '')})"
@@ -692,7 +742,9 @@ def export_game_sheets_pdf(trial_id, filepath):
         pages.setdefault((team["round_number"], team["court_number"]), {})[team["team"]] = team
 
     story = []
+    # One page for each court in each round, in round then court order
     for page_number, ((round_number, court_number), teams) in enumerate(sorted(pages.items())):
+        # Every page after the first starts with a page break
         if page_number:
             story.append(PageBreak())
         header = Table([[
@@ -709,6 +761,7 @@ def export_game_sheets_pdf(trial_id, filepath):
         story.append(both)
 
     directory = os.path.dirname(filepath)
+    # Make the folder if the path has one (a bare file name has no folder)
     if directory:
         os.makedirs(directory, exist_ok=True)
     SimpleDocTemplate(filepath, pagesize=A4, leftMargin=40, rightMargin=40,
@@ -722,12 +775,14 @@ def export_reference_sheet_csv(trial_id, filepath):
     can find their own row and read across. A '-' means they are resting. Returns the file path."""
     trial = get_trial(trial_id)
     draw = get_draw(trial_id)
+    # Nothing to write without a trial and a saved draw
     if not trial or not draw:
         raise ValueError("This trial has no draw yet.")
 
     round_numbers = sorted({t["round_number"] for t in draw})
     # cells[player_id][round_number] = "Court 2: GS (Blue)"; players holds each player's details
     cells, players = {}, {}
+    # Fill in one cell for every player in every team of the draw
     for team in draw:
         for p in team["players"]:
             players[p["player_id"]] = p
@@ -735,11 +790,13 @@ def export_reference_sheet_csv(trial_id, filepath):
                 f"Court {team['court_number']}: {p['position']} ({team['bib_colour']})")
 
     directory = os.path.dirname(filepath)
+    # Make the folder if the path has one (a bare file name has no folder)
     if directory:
         os.makedirs(directory, exist_ok=True)
     with open(filepath, "w", newline="", encoding="utf-8-sig") as f:  # utf-8-sig so Excel reads it correctly
         writer = csv.writer(f)
         writer.writerow(["Player", "Number", "Positions"] + [f"Round {n}" for n in round_numbers])
+        # One row per player in trial-number order; a round with no cell shows '-'
         for pid in sorted(players, key=lambda i: players[i].get("trial_number") or 0):
             p = players[pid]
             prefs = " ".join(x for x in (p.get("position_1"), p.get("position_2")) if x)
@@ -759,6 +816,9 @@ def export_reference_sheet_csv(trial_id, filepath):
 #     Parent Name, Parent Phone, Parent Email, Playing History,
 #     Position 1, Position 2, Position 3 (optional)
 
+# A list of names for the raw export's columns, in file order. It is a written record only:
+# parse_raw_rows() reads each column by its number (row[11]), because the club's export may
+# or may not have a header row to read names from.
 RAW_COLUMNS = [
     "trial_no", "full_name", "dob", "netball_id", "address", "phone", "email",
     "parent_name", "parent_phone", "parent_email", "playing_history",
@@ -779,9 +839,11 @@ def _read_rows(filepath):
 
 def detect_format(rows):
     """Returns 'clean' if the first row is this program's own header, otherwise 'raw' (a registration export)."""
+    # An empty file has no header to check
     if not rows:
         return "raw"
     first_row = [cell.strip() for cell in rows[0]]
+    # Compare the first six cells with this program's own headings
     if first_row[:len(CSV_HEADERS)] == CSV_HEADERS:
         return "clean"
     return "raw"
@@ -790,6 +852,7 @@ def detect_format(rows):
 def split_full_name(full_name):
     """Splits 'First Last' at the first space into (first, last). One word gives (word, '')."""
     full_name = full_name.strip()
+    # A single word has no last name
     if " " not in full_name:
         return full_name, ""
     first, last = full_name.split(" ", 1)
@@ -799,6 +862,7 @@ def split_full_name(full_name):
 def parse_clean_rows(rows):
     """Turns rows in this program's own export format into player dicts (skips the header)."""
     players = []
+    # Skip the header (row 0); a row with fewer than 6 cells can't hold a player
     for row in rows[1:]:
         if len(row) < 6:
             continue
@@ -816,10 +880,12 @@ def parse_raw_rows(rows):
     """Turns rows from a registration export into player dicts. Skips a header row if the third
     column is not a date, and any row with fewer than 13 columns."""
     start_index = 0
+    # If the third cell of the first row is not a date, the first row is a header: start at row 1
     if rows and len(rows[0]) > 2 and not is_valid_date(rows[0][2].strip()):
         start_index = 1
 
     players = []
+    # One player per row; a row with fewer than 13 cells is incomplete and skipped
     for row in rows[start_index:]:
         if len(row) < 13:
             continue
@@ -846,10 +912,13 @@ def parse_raw_rows(rows):
     return players
 
 
+# Reads the club's registration export, so 100+ players don't have to be typed in by hand.
+# It works out which layout the file is, then hands back plain dictionaries either way.
 def load_csv(filepath):
     """Reads a CSV file and returns (list of player dicts, 'clean' or 'raw')."""
     rows = _read_rows(filepath)
     fmt = detect_format(rows)
+    # Each layout has its own parser
     if fmt == "clean":
         return parse_clean_rows(rows), fmt
     return parse_raw_rows(rows), fmt
@@ -863,6 +932,7 @@ def trial_name_from_filename(filepath):
 def get_or_create_trial(trial_name, age_group, trial_date, num_courts):
     """Returns (trial_id, created). Reuses a trial with the same name, otherwise makes a new one."""
     existing = next((t for t in get_all_trials() if t["trial_name"] == trial_name), None)
+    # Reuse the trial if one with this name already exists
     if existing:
         return existing["trial_id"], False
 
@@ -881,6 +951,7 @@ def _prompt_for_position(field_label, invalid_value, player_label):
     corrected position, or None if they choose to skip this player."""
     print(f"  {player_label}: {field_label} is {invalid_value!r}, not a netball position.")
     valid_list = ", ".join(POSITIONS)
+    # Keep asking until the answer is a real position, or blank to skip the player
     while True:
         answer = input(
             f"    Correct {field_label} for {player_label} ({valid_list}), "
@@ -898,9 +969,12 @@ def seed_from_csv(filepath, trial_date, num_courts):
     (players loaded, rows skipped). Skips rows with no name or a bad date, players
     already in the trial (same netball ID, or same name and DOB), and players whose
     positions the coordinator does not correct when asked."""
+    # One export file becomes one trial, named after the file. Each row is checked on its own
+    # (name, date, positions, duplicates) so one bad row is skipped instead of the whole file.
     trial_name = trial_name_from_filename(filepath)
     age_group = trial_name
 
+    # A file that can't be opened or read is reported and skipped, so the other files still load
     try:
         players, fmt = load_csv(filepath)
     except (OSError, csv.Error) as e:
@@ -915,21 +989,29 @@ def seed_from_csv(filepath, trial_date, num_courts):
     # just append everyone again, doubling the roster. Skip anyone who
     # already matches an existing player by netball ID, or by name + DOB.
     existing = get_players_for_trial(trial_id)
+    # A set, not a list: the only question is "have we seen this ID?", and a set answers that
+    # quickly and holds no repeats. Blank IDs are left out so two blanks don't count as a match.
     seen_netball_ids = {p["netball_id"] for p in existing if p["netball_id"]}
+    # A set of (first, last, dob) tuples. A tuple can go in a set (a list can't) and all three
+    # parts must match. Names are lower-cased so "Emma" and "emma" are the same person.
     seen_name_dobs = {
         (p["first_name"].strip().lower(), p["last_name"].strip().lower(), p["dob"])
         for p in existing
     }
 
-    # Counters for the summary line printed when this file is done
+    # Counters for the summary line printed when this file is done. Four separate whole numbers,
+    # not one total, because the summary reports each kind of skipped row separately.
     loaded = 0
     skipped = 0
     duplicates = 0
     bad_positions = 0
+    # Check each row in turn; continue moves on to the next row without saving this one
     for p in players:
+        # Existence check: a player needs a first and a last name
         if not p["first_name"] or not p["last_name"]:
             skipped += 1
             continue
+        # Type check: the date of birth must be a real DD/MM/YYYY date
         if not is_valid_date(p["dob"]):
             skipped += 1
             continue
@@ -937,16 +1019,20 @@ def seed_from_csv(filepath, trial_date, num_courts):
         position_1 = p["position_1"]
         position_2 = p["position_2"]
         player_label = f"{p['first_name']} {p['last_name']} (DOB {p['dob']})"
+        # A position that is not one of the seven is put to the coordinator to correct
         if position_1 not in POSITIONS:
             position_1 = _prompt_for_position("Position 1", position_1, player_label)
+        # Position 2 is only asked about if Position 1 was not skipped
         if position_1 is not None and position_2 not in POSITIONS:
             position_2 = _prompt_for_position("Position 2", position_2, player_label)
+        # None means the coordinator chose to skip this player
         if position_1 is None or position_2 is None:
             bad_positions += 1
             continue
 
         netball_id = p.get("netball_id", "")
         name_dob = (p["first_name"].strip().lower(), p["last_name"].strip().lower(), p["dob"])
+        # Already in the trial: same Netball ID (if it has one), or same name and date of birth
         if (netball_id and netball_id in seen_netball_ids) or name_dob in seen_name_dobs:
             duplicates += 1
             continue
@@ -964,6 +1050,7 @@ def seed_from_csv(filepath, trial_date, num_courts):
             playing_history=p.get("playing_history", ""),
             position_3=p.get("position_3", ""),
         )
+        # Remember this player so a repeat later in the same file is also skipped
         if netball_id:
             seen_netball_ids.add(netball_id)
         seen_name_dobs.add(name_dob)
@@ -978,6 +1065,7 @@ def seed_from_csv(filepath, trial_date, num_courts):
 
 def prompt_for_shared_settings(args):
     """Asks in the terminal for the trial date and number of courts if they were not given as options."""
+    # Only ask for what was not given as a command-line option
     if not args.date:
         args.date = input("Trial date for all trials (DD/MM/YYYY): ").strip()
     if not args.courts:
@@ -992,12 +1080,15 @@ def main():
         description="Scans this script's folder for CSV files and loads each one into its "
                      "own trial (named after the file)."
     )
+    # The export has no trial date or court count in it, so they are given once here (or asked
+    # for) and applied to every file that gets loaded.
     parser.add_argument("--date", default=None, help="Trial date applied to every CSV, DD/MM/YYYY")
     parser.add_argument("--courts", type=int, default=None,
                          help="Number of courts applied to every CSV (defaults to 1)")
     args = parser.parse_args()
 
     csv_files = find_csv_files()
+    # No CSV files next to the script: say so and stop
     if not csv_files:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         print(f"No CSV files found in {script_dir} - nothing to load.")
@@ -1010,6 +1101,7 @@ def main():
 
     total_loaded = 0
     total_skipped = 0
+    # Load each file into its own trial and add up the totals
     for filepath in csv_files:
         loaded, skipped = seed_from_csv(filepath, args.date, args.courts)
         total_loaded += loaded
@@ -1060,6 +1152,7 @@ def generate_test_players(count=100):
     # Fixed seed, so the same made-up players are produced every time (repeatable tests)
     random.seed(42)
     players = []
+    # Build one made-up player per pass; _ is used because the counter itself is not needed
     for _ in range(count):
         first_name = random.choice(FIRST_NAMES)
         last_name = random.choice(LAST_NAMES)
@@ -1075,6 +1168,7 @@ def load_test_players(count=100):
     trials = get_all_trials()
     existing = next((t for t in trials if t["trial_name"] == trial_name), None)
 
+    # Reuse the test trial if it already exists, otherwise create it
     if existing:
         trial_id = existing["trial_id"]
         print(f"Using existing trial: {trial_name} (id {trial_id})")
@@ -1084,6 +1178,7 @@ def load_test_players(count=100):
         print(f"Created new trial '{trial_name}' (id {trial_id})")
 
     players = generate_test_players(count)
+    # Save each made-up player and print the trial number they were given
     for first_name, last_name, dob, pos1, pos2 in players:
         trial_number = create_player(trial_id, first_name, last_name, dob, pos1, pos2)
         print(f"  #{trial_number} {first_name} {last_name} ({pos1}/{pos2})")
