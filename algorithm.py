@@ -13,17 +13,25 @@ both their preferred positions at least once.
 import math
 import random
 
-# Standard court order, goal shooter (GS) to goal keeper (GK); slots are also filled in this order
+# Standard court order, goal shooter (GS) to goal keeper (GK); slots are also filled in this
+# order. A list, not a set, because order matters: every team's slots line up the same way.
+# Text, because positions are codes, not numbers.
 POSITION_ORDER = ["GS", "GA", "WA", "C", "WD", "GD", "GK"]
-# A netball team has 7 players on court
+# A netball team has 7 players on court. Named once so the rule isn't repeated as a bare 7 or
+# 14 in several places; capitals because it never changes while the program runs.
 PLAYERS_PER_TEAM = 7
-# Safety cap so the program cannot loop forever if a roster can never be satisfied
+# Safety cap so the program cannot loop forever if a roster can never be satisfied. It is not a
+# target: the loop normally stops as soon as everyone has had both positions.
 MAX_ROUNDS = 80
 
-# Set True to print how many slots each phase fills in every round (debugging)
+# Set True to print how many slots each phase fills in every round (debugging). A True/False
+# switch, because it is only ever on or off. It is a global so generate_rounds() can check it
+# in two places. False by default, so a normal run prints nothing.
 DEBUG = False
 
-# (Team A colour, Team B colour) for each court; repeats after four courts
+# (Team A colour, Team B colour) for each court; repeats after four courts. Each pair is a
+# tuple because the two colours always go together and never change. The list is indexed by
+# court number (see bib_colours_for_court).
 BIB_COLOUR_POOL = [
     ("Black", "Pink"),
     ("Blue", "Orange"),
@@ -38,15 +46,20 @@ def bib_colours_for_court(court_number):
     return {"A": pair[0], "B": pair[1]}
 
 
+# A dictionary keyed by court number, so one court's colours are looked up directly, e.g.
+# COURT_BIB_COLOURS[2]["A"], not searched for. Built once for courts 1 to 4.
 COURT_BIB_COLOURS = {c: bib_colours_for_court(c) for c in range(1, 5)}
 
 
 def theoretical_minimum_rounds(players, num_courts):
     """Lower bound on rounds needed, from slot supply vs preference demand."""
+    # No players means no rounds are needed
     if not players:
         return 0
-    # demand[position] = how many players want that position as 1st or 2nd choice
+    # demand[position] = how many players want that position as 1st or 2nd choice. A dictionary,
+    # because the positions are the keys and .get(position, 0) starts a count at 0 the first time.
     demand = {}
+    # Count each player's 1st choice, and their 2nd if it is a different position
     for p in players:
         demand[p["position_1"]] = demand.get(p["position_1"], 0) + 1
         if p["position_2"] != p["position_1"]:
@@ -74,9 +87,11 @@ def _claim(slots_for_pos, ranked, used, filled, skip):
     Players who were ranked but missed out get 1 added to their skip counter, so they rank higher next round."""
     free = [s for s in slots_for_pos if s not in filled]
     winners = ranked[: len(free)]
+    # Pair each free slot with the next winner; zip stops when either list runs out
     for slot, player in zip(free, winners):
         filled[slot] = player
         used.add(player["player_id"])
+    # Ranked players beyond the free slots missed out this round
     for player in ranked[len(free):]:
         skip[player["player_id"]] += 1
     return winners
@@ -84,6 +99,7 @@ def _claim(slots_for_pos, ranked, used, filled, skip):
 
 def generate_rounds(players, num_rounds, num_courts=1):
     """Generate `num_rounds` rounds across `num_courts` courts."""
+    # Range checks: there must be at least one court and one round
     if num_courts < 1:
         raise ValueError("num_courts must be at least 1.")
     if num_rounds < 1:
@@ -96,6 +112,7 @@ def generate_rounds(players, num_rounds, num_courts=1):
             raise ValueError(f"Player {p['player_id']} has a position that is not one of {', '.join(POSITION_ORDER)}.")
 
     players_needed = PLAYERS_PER_TEAM * 2 * num_courts
+    # Existence check: two full teams of 7 are needed for every court
     if len(players) < players_needed:
         raise ValueError(
             f"Need at least {players_needed} present players for {num_courts} court(s), "
@@ -103,19 +120,27 @@ def generate_rounds(players, num_rounds, num_courts=1):
         )
 
     # The dicts below each track every player through the trial
+    # A list of every player id, made once so all the dictionaries below use the same keys.
     ids = [p["player_id"] for p in players]
-    # pos1_done / pos2_done: has the player played their 1st / 2nd preference yet?
+    # pos1_done / pos2_done: has the player played their 1st / 2nd preference yet? Dictionaries of
+    # player id -> True/False, because that is the only question. One each, so the two are tracked
+    # separately.
     pos1_done = {pid: False for pid in ids}
     pos2_done = {pid: False for pid in ids}
-    # skip1 / skip2: times a player needed a preferred slot but missed out (more misses = higher in the queue)
+    # skip1 / skip2: times a player needed a preferred slot but missed out (more misses = higher in
+    # the queue). Whole-number counters, not True/False, so someone who missed out twice is ranked
+    # ahead of someone who missed out once (see the sort keys below).
     skip1 = {pid: 0 for pid in ids}
     skip2 = {pid: 0 for pid in ids}
-    # Rounds in a row the player has sat out; used to choose filler players fairly
+    # Rounds in a row the player has sat out; used to choose filler players fairly. A counter, set
+    # back to 0 when they play, so whoever has waited longest is picked first.
     bench_wait = {pid: 0 for pid in ids}
 
-    # One entry for every place on court in a round (court, team, position)
+    # One entry for every place on court in a round (court, team, position). A list, because each
+    # slot is referred to by its number (its index). Built once and reused every round.
     slot_template = _build_slots(num_courts)
-    # {position: [slot numbers]} so each position's slots can be found quickly
+    # {position: [slot numbers]} so each position's slots can be found quickly. It holds slot
+    # numbers, not copies of the slots, so there is only ever one copy of each slot.
     slots_by_position = {
         pos: [i for i, s in enumerate(slot_template) if s["position"] == pos]
         for pos in POSITION_ORDER
@@ -123,10 +148,13 @@ def generate_rounds(players, num_rounds, num_courts=1):
 
     rounds_output = []
 
+    # Build one round at a time; the counters above carry over from round to round
     for round_number in range(1, num_rounds + 1):
-        # filled: slot number -> the player placed there this round
+        # filled: slot number -> the player placed there this round. A dictionary, because slots are
+        # filled out of order (all the GS first, then GA...) and `index in filled` says if one is taken.
         filled = {}
-        # used: ids already placed this round (a set is a quick 'already used?' check)
+        # used: ids already placed this round. A set, because a player can only be placed once and the
+        # only question is 'already in?' (a quick check, and adding the same id twice does nothing).
         used = set()
 
         # Phase A: give each position's slots to players who still need it as their 1st choice
@@ -161,6 +189,7 @@ def generate_rounds(players, num_rounds, num_courts=1):
             key=lambda p: (-bench_wait[p["player_id"]], p["player_id"]),
         )
         spare_iter = iter(spare)
+        # Walk every slot in order; a slot already filled in phase A or B is skipped
         for index in range(len(slot_template)):
             if index in filled:
                 continue
@@ -173,8 +202,10 @@ def generate_rounds(players, num_rounds, num_courts=1):
             print(f"Round {round_number}: phase A filled {filled_by_a} slots, phase B {filled_by_b}, "
                   f"phase C {len(slot_template) - filled_by_a - filled_by_b}")
 
-        # by_team: (court, team) -> list of {position, player} used to build the output
+        # by_team: (court, team) -> list of {position, player} used to build the output. The key is a
+        # tuple, because a tuple can be a dictionary key and a list can't.
         by_team = {}
+        # Put each placed player into their team's list, and tick off a preference if this slot is one
         for index, slot in enumerate(slot_template):
             player = filled[index]
             pid = player["player_id"]
@@ -187,6 +218,7 @@ def generate_rounds(players, num_rounds, num_courts=1):
             if slot["position"] == player["position_2"] and not pos2_done[pid]:
                 pos2_done[pid] = True
 
+        # One output row per team, sorted by court then team
         for (court_number, team), assignments in sorted(by_team.items()):
             rounds_output.append({
                 "round_number": round_number,
@@ -210,11 +242,14 @@ def generate_rounds(players, num_rounds, num_courts=1):
 def check_guarantee_met(players, rounds_output):
     """Returns player ids who haven't yet played both preferred positions."""
     by_id = {p["player_id"]: p for p in players}
-    # ids who have played their 1st / 2nd preferred position at least once
+    # ids who have played their 1st / 2nd preferred position at least once. Sets, because only
+    # 'at least once' matters, so adding the same id again changes nothing.
     seen1, seen2 = set(), set()
+    # Go through every assignment in every round and note which preferences were played
     for round_data in rounds_output:
         for a in round_data["assignments"]:
             player = by_id.get(a["player_id"])
+            # Skip an assignment whose player is not in the list
             if player is None:
                 continue
             if a["position"] == player["position_1"]:
@@ -231,8 +266,10 @@ def generate_minimum_rounds(players, num_courts=1, max_rounds=MAX_ROUNDS):
     for num_rounds in range(1, max_rounds + 1):
         rounds_output = generate_rounds(players, num_rounds, num_courts)
         failed = check_guarantee_met(players, rounds_output)
+        # An empty list means every player has had both positions
         if not failed:
             return rounds_output, num_rounds, []
+    # The cap was reached: hand back the last attempt and who is still missing out
     return rounds_output, max_rounds, failed
 
 
@@ -246,6 +283,7 @@ def _random_roster(seed, n, demand_skew=0.0, skewed_position="GK"):
     choice, which makes some positions very popular. The seed makes it repeatable."""
     random.seed(seed)
     players = []
+    # Make each player: a 1st choice (the skewed position with chance demand_skew), then a different 2nd choice
     for i in range(n):
         if demand_skew and random.random() < demand_skew:
             pos1 = skewed_position
@@ -260,9 +298,11 @@ def _build_sweep_configs():
     """Returns the (seed, players, courts, skew) combinations used by the full stress test."""
     configs = []
     seed = 0
+    # Every mix of 1 to 3 courts, five roster sizes and three skews; each gets its own seed
     for num_courts in (1, 2, 3):
         min_needed = 14 * num_courts
         for n in (14, 28, 50, 100, 150):
+            # Too few players to fill the courts: skip this size
             if n < min_needed:
                 continue
             for skew in (0.0, 0.3, 0.7):
@@ -274,6 +314,7 @@ def _build_sweep_configs():
 def run_stress_test(quick=False):
     """Runs many random rosters through generate_minimum_rounds and prints how many met the
     guarantee and how close to the theoretical minimum they got. quick=True runs just 50."""
+    # Quick mode: 50 seeds of one roster size; otherwise the full sweep
     if quick:
         configs = [(seed, 100, 2, 0.0) for seed in range(50)]
     else:
@@ -285,6 +326,7 @@ def run_stress_test(quick=False):
     max_rounds_seen = 0
     total_rounds = 0
 
+    # Run each roster and record how it went
     for seed, n, num_courts, skew in configs:
         roster = _random_roster(seed, n, demand_skew=skew)
         rounds_output, rounds_used, failed = generate_minimum_rounds(roster, num_courts)
@@ -292,9 +334,11 @@ def run_stress_test(quick=False):
 
         max_rounds_seen = max(max_rounds_seen, rounds_used)
         total_rounds += rounds_used
+        # Drawn in the fewest rounds that are possible in theory
         if rounds_used == lower_bound:
             optimal += 1
 
+        # Report any roster that hit the round cap
         if failed:
             failures += 1
             print(f"n={n:>3} courts={num_courts} skew={skew}: FAILED - "
