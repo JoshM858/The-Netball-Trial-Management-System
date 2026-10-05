@@ -13,9 +13,11 @@ from tkinter import ttk, messagebox
 
 import players as store
 
-# The seven netball positions
+# The seven netball positions, in court order GS to GK. A list, because it fills the drop-downs
+# in that order. Same values as POSITIONS in main.py and players.py.
 POSITIONS = ["GS", "GA", "WA", "C", "WD", "GD", "GK"]
-# Longest playing history allowed (matches the data dictionary)
+# Longest playing history allowed (matches the data dictionary). A whole number named once, so
+# the limit, the counter label and the cut-off in on_playing_history_typed() all agree.
 PLAYING_HISTORY_MAX_CHARS = 150
 
 # Same colours as the main app
@@ -31,6 +33,7 @@ FONT_FAMILY = "Arial"
 def setup_styles(root):
     """Sets the same colours and fonts as the main app for every kind of widget used here."""
     style = ttk.Style(root)
+    # Use the clam theme if it is available; otherwise keep the default theme
     try:
         style.theme_use("clam")
     except tk.TclError:
@@ -77,7 +80,8 @@ class SignupApp(tk.Tk):
         )
         header.pack(fill="x")
 
-        # Trials shown in the dropdown; if there are none only a message is shown
+        # Trials shown in the dropdown; if there are none only a message is shown. A list in date order:
+        # combo.current() gives a position number, which is used as an index to find the chosen trial.
         self.trials = store.get_all_trials()
         if not self.trials:
             ttk.Label(
@@ -138,6 +142,8 @@ class SignupApp(tk.Tk):
 
     def _entry(self, parent, attr_name, width=32):
         """Makes a text box and stores it on self under attr_name so submit() can read it later."""
+        # Entry for free-text answers (names, address, phone, email). Everything typed is a str, so
+        # submit() strips each value and checks it before saving.
         entry = ttk.Entry(parent, width=width)
         setattr(self, attr_name, entry)
         return entry
@@ -145,6 +151,7 @@ class SignupApp(tk.Tk):
     def _build_trial_picker(self, parent):
         """Makes the dropdown of trials, starting on the first one."""
         self.trial_var = tk.StringVar()
+        # Read-only Combobox, so a player can only register for a trial that exists, not type one.
         combo = ttk.Combobox(parent, textvariable=self.trial_var, state="readonly", width=30)
         combo["values"] = [f"{t['trial_name']} ({t['age_group']})" for t in self.trials]
         combo.current(0)
@@ -164,6 +171,7 @@ class SignupApp(tk.Tk):
 
     def _build_pos1_combo(self, parent):
         """Makes the read-only dropdown for Position 1."""
+        # Read-only Combobox of POSITIONS: only the seven real positions can be chosen.
         self.pos1_combo = ttk.Combobox(parent, values=POSITIONS, state="readonly", width=8)
         return self.pos1_combo
 
@@ -174,12 +182,15 @@ class SignupApp(tk.Tk):
 
     def _build_pos3_combo(self, parent):
         """Makes the read-only dropdown for Position 3 (can be left blank)."""
+        # The same list with a blank choice added, so the optional Position 3 can be left empty.
         self.pos3_combo = ttk.Combobox(parent, values=[""] + POSITIONS, state="readonly", width=8)
         return self.pos3_combo
 
     def _build_playing_history(self, parent):
         """Makes the multi-line playing history box with its live character counter."""
         wrapper = ttk.Frame(parent)
+        # Text box (several lines), not an Entry, because playing history is a sentence or two. It is
+        # capped at PLAYING_HISTORY_MAX_CHARS so the saved CSV cell stays short.
         self.playing_history_text = tk.Text(wrapper, width=32, height=4, wrap="word", font=(FONT_FAMILY, 10))
         self.playing_history_text.pack(anchor="w")
         self.playing_history_counter = ttk.Label(
@@ -196,6 +207,7 @@ class SignupApp(tk.Tk):
     def selected_trial(self):
         """Returns the trial picked in the dropdown as a dict, or None."""
         index = self.trial_combo.current()
+        # current() is -1 when nothing is picked
         if index < 0:
             return None
         return self.trials[index]
@@ -205,9 +217,11 @@ class SignupApp(tk.Tk):
         registration, since a permit can override it."""
         dob = self.dob_entry.get().strip()
         trial = self.selected_trial()
+        # Nothing typed or no trial: clear the message and stop
         if not dob or not trial:
             self.dob_validation_label.configure(text="")
             return
+        # Only say 'Invalid date format' once 10 characters are typed, not on every keystroke
         if not store.is_valid_date(dob):
             if len(dob) >= 10:
                 self.dob_validation_label.configure(text="Invalid date format", style="Invalid.TLabel")
@@ -226,6 +240,7 @@ class SignupApp(tk.Tk):
         counter beside it live."""
         # Tk text boxes start at line 1 char 0; end-1c leaves off the automatic final newline
         text = self.playing_history_text.get("1.0", "end-1c")
+        # Over the limit: cut the text back and put the shortened text in the box
         if len(text) > PLAYING_HISTORY_MAX_CHARS:
             text = text[:PLAYING_HISTORY_MAX_CHARS]
             self.playing_history_text.delete("1.0", "end")
@@ -239,6 +254,7 @@ class SignupApp(tk.Tk):
     def submit(self):
         """Checks the form, saves the player, shows the trial number and clears the form for the next player."""
         trial = self.selected_trial()
+        # Existence check: a trial must be picked
         if not trial:
             messagebox.showerror("Error", "Select a trial to register for.")
             return
@@ -256,27 +272,34 @@ class SignupApp(tk.Tk):
         email = self.email_entry.get().strip()
         parent_email = self.parent_email_entry.get().strip()
 
+        # Existence check: the five required details
         if not first_name or not last_name or not dob or not pos1 or not pos2:
             messagebox.showerror(
                 "Error", "First name, last name, DOB, Position 1 and Position 2 are required."
             )
             return
+        # Type check: the date of birth must be a real DD/MM/YYYY date
         if not store.is_valid_date(dob):
             messagebox.showerror("Error", "DOB must be in DD/MM/YYYY format.")
             return
+        # Range check: a date of birth can't be after today
         if store.is_future_date(dob):
             messagebox.showerror("Error", "Date of birth can't be in the future.")
             return
+        # The two required positions must be different
         if pos1 == pos2:
             messagebox.showerror("Error", "Position 1 and Position 2 must be different.")
             return
+        # Names can't contain a digit (checks every character of both names)
         if any(ch.isdigit() for ch in first_name + last_name):
             messagebox.showerror("Error", "Names can't contain numbers.")
             return
+        # Each phone number is checked only if one was typed; label names the box in the error message
         for label, value in (("Phone", phone), ("Parent/Guardian Phone", parent_phone)):
             if value and not store.is_valid_phone(value):
                 messagebox.showerror("Error", f"{label} must be an Australian number, e.g. 0412 345 678.")
                 return
+        # Each email address is checked only if one was typed
         for label, value in (("Email", email), ("Parent/Guardian Email", parent_email)):
             if value and not store.is_valid_email(value):
                 messagebox.showerror("Error", f"{label} must look like name@example.com.")
@@ -304,6 +327,7 @@ class SignupApp(tk.Tk):
 
     def clear_form(self):
         """Empties every box and dropdown, ready for the next person."""
+        # Empty each text box by its attribute name
         for attr in (
             "first_name_entry", "last_name_entry", "dob_entry", "netball_id_entry",
             "address_entry", "phone_entry", "email_entry", "parent_name_entry",
